@@ -3,7 +3,7 @@ module github.com/atterpac/gnat
 go 1.24.0
 
 require (
-	github.com/atterpac/jig v0.1.1
+	github.com/atterpac/jig v0.1.2
 	github.com/gdamore/tcell/v2 v2.13.4
 	github.com/nats-io/nats.go v1.39.1
 	github.com/rivo/tview v0.42.0
@@ -23,4 +23,4 @@ require (
 	golang.org/x/text v0.31.0 // indirect
 )
 
-replace github.com/atterpac/jig => ../jig
+// replace github.com/atterpac/jig => ../jig
