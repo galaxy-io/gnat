@@ -1,0 +1,65 @@
+services:
+  nats:
+    image: nats:latest
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
+      - "--name"
+      - "n1"
+      - "--cluster_name"
+      - "gnat"
+      - "--cluster"
+      - "nats://0.0.0.0:6222"
+      - "--routes"
+      - "nats://nats-1:6222,nats://nats-2:6222"
+    volumes:
+      - nats-data:/data
+
+  nats-1:
+    image: nats:latest
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
+      - "--name"
+      - "n2"
+      - "--cluster_name"
+      - "gnat"
+      - "--cluster"
+      - "nats://0.0.0.0:6222"
+      - "--routes"
+      - "nats://nats:6222,nats://nats-2:6222"
+    volumes:
+      - nats-1-data:/data
+
+  nats-2:
+    image: nats:latest
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
+      - "--name"
+      - "n3"
+      - "--cluster_name"
+      - "gnat"
+      - "--cluster"
+      - "nats://0.0.0.0:6222"
+      - "--routes"
+      - "nats://nats:6222,nats://nats-1:6222"
+    volumes:
+      - nats-2-data:/data
+
+volumes:
+  nats-data:
+  nats-1-data:
+  nats-2-data:

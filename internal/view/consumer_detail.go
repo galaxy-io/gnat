@@ -1,0 +1,245 @@
+package view
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/atterpac/jig/binding"
+	"github.com/atterpac/jig/components"
+	"github.com/atterpac/jig/theme"
+	"github.com/gdamore/tcell/v2"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/rivo/tview"
+)
+
+// ConsumerDetail shows full config and metrics for a single consumer.
+type ConsumerDetail struct {
+	*components.Split
+	app          *App
+	streamName   string
+	consumerName string
+
+	configView  *tview.TextView
+	metricsView *tview.TextView
+
+	info        *binding.Value[*jetstream.ConsumerInfo]
+	stopRefresh chan struct{}
+	stopped     int32
+
+	// For rate calculation
+	lastDelivered uint64
+	lastAcked     uint64
+	lastSample    time.Time
+}
+
+// NewConsumerDetail creates the consumer detail view.
+func NewConsumerDetail(app *App, streamName, consumerName string) *ConsumerDetail {
+	cd := &ConsumerDetail{
+		app:          app,
+		streamName:   streamName,
+		consumerName: consumerName,
+		stopRefresh:  make(chan struct{}),
+	}
+
+	cd.configView = tview.NewTextView().SetDynamicColors(true)
+	cd.configView.SetBackgroundColor(theme.Get().Bg())
+	theme.Register(cd.configView)
+
+	cd.metricsView = tview.NewTextView().SetDynamicColors(true)
+	cd.metricsView.SetBackgroundColor(theme.Get().Bg())
+	theme.Register(cd.metricsView)
+
+	// Set up reactive binding for consumer info
+	cd.info = binding.NewValue[*jetstream.ConsumerInfo](nil)
+	cd.info.BindToWithDraw(func(info *jetstream.ConsumerInfo) {
+		if info != nil {
+			cd.renderConfig(info)
+			cd.renderMetrics(info)
+		}
+	})
+
+	configPanel := components.NewPanel().SetTitle("Config").SetContent(cd.configView)
+	metricsPanel := components.NewPanel().SetTitle("Metrics").SetContent(cd.metricsView)
+
+	// Use Split for resizable panes (Ctrl+Arrow to resize)
+	cd.Split = components.NewSplit().
+		SetDirection(components.SplitHorizontal).
+		SetRatio(0.5).
+		SetLeft(configPanel).
+		SetRight(metricsPanel)
+
+	return cd
+}
+
+func (cd *ConsumerDetail) Name() string { return cd.consumerName }
+
+func (cd *ConsumerDetail) Start() {
+	go func() {
+		cd.loadInfo()
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-cd.stopRefresh:
+				return
+			case <-ticker.C:
+				cd.loadInfo()
+			}
+		}
+	}()
+}
+
+func (cd *ConsumerDetail) Stop() {
+	atomic.StoreInt32(&cd.stopped, 1)
+	select {
+	case cd.stopRefresh <- struct{}{}:
+	default:
+	}
+}
+
+func (cd *ConsumerDetail) Hints() []components.KeyHint {
+	return []components.KeyHint{
+		{Key: "r", Description: "Refresh"},
+		{Key: "Esc", Description: "Back"},
+	}
+}
+
+func (cd *ConsumerDetail) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
+	return cd.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
+		if event.Rune() == 'r' {
+			go cd.loadInfo()
+		}
+	})
+}
+
+func (cd *ConsumerDetail) loadInfo() {
+	provider := cd.app.Provider()
+	if provider == nil {
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		info, err := provider.GetConsumerInfo(ctx, cd.streamName, cd.consumerName)
+
+		// Check if view was stopped while fetching
+		if atomic.LoadInt32(&cd.stopped) == 1 {
+			return
+		}
+
+		if err != nil {
+			cd.app.QueueUpdateDraw(func() {
+				cd.configView.SetText(fmt.Sprintf("[red]Error: %v[-]", err))
+			})
+			return
+		}
+		cd.info.SetAndDraw(info)
+	}()
+}
+
+func (cd *ConsumerDetail) renderConfig(info *jetstream.ConsumerInfo) {
+	if info == nil {
+		return
+	}
+	cfg := info.Config
+	dim := theme.TagFgDim()
+
+	filter := cfg.FilterSubject
+	if filter == "" && len(cfg.FilterSubjects) > 0 {
+		filter = strings.Join(cfg.FilterSubjects, ", ")
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[%s]Name:[-]              %s\n", dim, cd.consumerName)
+	fmt.Fprintf(&b, "[%s]Description:[-]       %s\n", dim, cfg.Description)
+	fmt.Fprintf(&b, "[%s]Filter:[-]            %s\n", dim, filter)
+	fmt.Fprintf(&b, "[%s]Deliver Policy:[-]    %s\n", dim, deliverPolicyString(cfg.DeliverPolicy))
+	fmt.Fprintf(&b, "[%s]Ack Policy:[-]        %s\n", dim, ackPolicyString(cfg.AckPolicy))
+	fmt.Fprintf(&b, "[%s]Ack Wait:[-]          %s\n", dim, cfg.AckWait)
+	fmt.Fprintf(&b, "[%s]Max Deliver:[-]       %d\n", dim, cfg.MaxDeliver)
+	fmt.Fprintf(&b, "[%s]Max Ack Pending:[-]   %d\n", dim, cfg.MaxAckPending)
+	fmt.Fprintf(&b, "[%s]Replay:[-]            %s\n", dim, replayPolicyString(cfg.ReplayPolicy))
+	fmt.Fprintf(&b, "[%s]Inactive Threshold:[-]%s\n", dim, cfg.InactiveThreshold)
+	fmt.Fprintf(&b, "\n[%s]--- Pull Config ---[-]\n", dim)
+	fmt.Fprintf(&b, "[%s]Max Waiting:[-]       %d\n", dim, cfg.MaxWaiting)
+	fmt.Fprintf(&b, "[%s]Max Batch:[-]         %d\n", dim, cfg.MaxRequestBatch)
+	fmt.Fprintf(&b, "[%s]Max Expires:[-]       %s\n", dim, cfg.MaxRequestExpires)
+
+	cd.configView.SetText(b.String())
+}
+
+func (cd *ConsumerDetail) renderMetrics(info *jetstream.ConsumerInfo) {
+	if info == nil {
+		return
+	}
+	dim := theme.TagFgDim()
+
+	now := time.Now()
+	var procRate, ackRate float64
+	if !cd.lastSample.IsZero() {
+		elapsed := now.Sub(cd.lastSample).Seconds()
+		if elapsed > 0 {
+			procRate = float64(info.Delivered.Consumer-cd.lastDelivered) / elapsed
+			ackRate = float64(info.AckFloor.Consumer-cd.lastAcked) / elapsed
+		}
+	}
+	cd.lastDelivered = info.Delivered.Consumer
+	cd.lastAcked = info.AckFloor.Consumer
+	cd.lastSample = now
+
+	lag := info.NumPending + uint64(info.NumAckPending)
+	errorRate := float64(0)
+	if info.Delivered.Consumer > 0 {
+		errorRate = float64(info.NumRedelivered) / float64(info.Delivered.Consumer) * 100
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[%s]Delivered Seq:[-]   #%d\n", dim, info.Delivered.Consumer)
+	fmt.Fprintf(&b, "[%s]Ack Floor Seq:[-]   #%d\n", dim, info.AckFloor.Consumer)
+	fmt.Fprintf(&b, "[%s]Proc Rate:[-]       %.1f msg/s\n", dim, procRate)
+	fmt.Fprintf(&b, "[%s]Ack Rate:[-]        %.1f msg/s\n", dim, ackRate)
+	fmt.Fprintf(&b, "\n")
+	fmt.Fprintf(&b, "[%s]Pending:[-]         %s\n", dim, formatNumber(info.NumPending))
+	fmt.Fprintf(&b, "[%s]Ack Pending:[-]     %d\n", dim, info.NumAckPending)
+	fmt.Fprintf(&b, "[%s]Redelivered:[-]     %d\n", dim, info.NumRedelivered)
+	fmt.Fprintf(&b, "[%s]Waiting:[-]         %d\n", dim, info.NumWaiting)
+	fmt.Fprintf(&b, "[%s]Lag:[-]             %d\n", dim, lag)
+	fmt.Fprintf(&b, "[%s]Error Rate:[-]      %.3f%%\n", dim, errorRate)
+
+	cd.metricsView.SetText(b.String())
+}
+
+func deliverPolicyString(p jetstream.DeliverPolicy) string {
+	switch p {
+	case jetstream.DeliverAllPolicy:
+		return "All"
+	case jetstream.DeliverLastPolicy:
+		return "Last"
+	case jetstream.DeliverNewPolicy:
+		return "New"
+	case jetstream.DeliverByStartSequencePolicy:
+		return "ByStartSequence"
+	case jetstream.DeliverByStartTimePolicy:
+		return "ByStartTime"
+	case jetstream.DeliverLastPerSubjectPolicy:
+		return "LastPerSubject"
+	default:
+		return "Unknown"
+	}
+}
+
+func replayPolicyString(p jetstream.ReplayPolicy) string {
+	switch p {
+	case jetstream.ReplayInstantPolicy:
+		return "Instant"
+	case jetstream.ReplayOriginalPolicy:
+		return "Original"
+	default:
+		return "Unknown"
+	}
+}
