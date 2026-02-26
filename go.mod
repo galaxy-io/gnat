@@ -3,10 +3,11 @@ module github.com/atterpac/gnat
 go 1.24.0
 
 require (
-	github.com/atterpac/jig v0.1.2
+	github.com/atterpac/jig v0.1.4
 	github.com/gdamore/tcell/v2 v2.13.4
 	github.com/nats-io/nats.go v1.39.1
 	github.com/rivo/tview v0.42.0
+	golang.org/x/term v0.37.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -19,7 +20,6 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
-	golang.org/x/term v0.37.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
 )
 
