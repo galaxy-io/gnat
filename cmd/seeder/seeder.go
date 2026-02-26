@@ -670,17 +670,15 @@ func seedExtraMessages(ctx context.Context, js jetstream.JetStream, count int) {
 	fmt.Printf("Published %d extra messages\n", published)
 }
 
-// runLivePublisher continuously publishes messages until interrupted
-func runLivePublisher(nc *nats.Conn, js jetstream.JetStream, rate time.Duration) {
+// runLivePublisher continuously publishes messages with random throughput
+// fluctuations to simulate realistic traffic patterns (bursts, lulls, ramps).
+func runLivePublisher(nc *nats.Conn, js jetstream.JetStream, baseRate time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Handle shutdown gracefully
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	ticker := time.NewTicker(rate)
-	defer ticker.Stop()
 
 	regions := []string{"us-east", "us-west", "eu-west", "ap-south"}
 	statuses := []string{"created", "processing", "completed", "cancelled"}
@@ -693,64 +691,109 @@ func runLivePublisher(nc *nats.Conn, js jetstream.JetStream, rate time.Duration)
 	msgCount := 0
 	startTime := time.Now()
 
+	// Throughput control — changes every phaseLen messages
+	phaseLen := 50 + rand.Intn(100)       // messages per phase
+	phaseCount := 0                         // messages in current phase
+	rateMultiplier := 1.0                   // current rate multiplier
+	burstRemaining := 0                     // messages left in a burst (no delay)
+
+	// Pick a new traffic phase
+	nextPhase := func() {
+		phaseLen = 40 + rand.Intn(120)
+		phaseCount = 0
+
+		r := rand.Float64()
+		switch {
+		case r < 0.10: // 10%: quiet lull
+			rateMultiplier = 3.0 + rand.Float64()*4.0 // 3-7x slower
+			fmt.Printf("  ~ lull (%.1fx slower)\n", rateMultiplier)
+		case r < 0.25: // 15%: burst — send a batch with no delay
+			burstRemaining = 10 + rand.Intn(40)
+			rateMultiplier = 1.0
+			fmt.Printf("  ~ burst (%d msgs)\n", burstRemaining)
+		case r < 0.50: // 25%: fast
+			rateMultiplier = 0.2 + rand.Float64()*0.5 // 0.2-0.7x faster
+			fmt.Printf("  ~ fast (%.1fx)\n", rateMultiplier)
+		default: // 50%: normal with jitter
+			rateMultiplier = 0.7 + rand.Float64()*0.6 // 0.7-1.3x
+		}
+	}
+	nextPhase()
+
 	for {
+		// Calculate delay for this message
+		var delay time.Duration
+		if burstRemaining > 0 {
+			delay = time.Duration(rand.Intn(10)) * time.Millisecond // near-instant
+			burstRemaining--
+		} else {
+			jitter := 0.8 + rand.Float64()*0.4 // 0.8-1.2x per-message jitter
+			delay = time.Duration(float64(baseRate) * rateMultiplier * jitter)
+		}
+
 		select {
 		case <-sigCh:
 			elapsed := time.Since(startTime)
 			fmt.Printf("\nStopped. Published %d messages in %v (%.1f msg/s)\n",
 				msgCount, elapsed.Round(time.Second), float64(msgCount)/elapsed.Seconds())
 			return
+		case <-time.After(delay):
+		}
 
-		case <-ticker.C:
-			var subject, data string
-			now := time.Now().Format(time.RFC3339Nano)
+		var subject, data string
+		now := time.Now().Format(time.RFC3339Nano)
 
-			// Rotate through different message types
-			switch rand.Intn(5) {
-			case 0: // Order
-				status := statuses[rand.Intn(len(statuses))]
-				region := regions[rand.Intn(len(regions))]
-				subject = fmt.Sprintf("orders.%s", status)
-				data = fmt.Sprintf(`{"ts":"%s","order_id":"ORD-%06d","status":"%s","region":"%s","amount":%.2f}`,
-					now, rand.Intn(999999), status, region, rand.Float64()*500+5)
+		// Rotate through different message types
+		switch rand.Intn(5) {
+		case 0: // Order
+			status := statuses[rand.Intn(len(statuses))]
+			region := regions[rand.Intn(len(regions))]
+			subject = fmt.Sprintf("orders.%s", status)
+			data = fmt.Sprintf(`{"ts":"%s","order_id":"ORD-%06d","status":"%s","region":"%s","amount":%.2f}`,
+				now, rand.Intn(999999), status, region, rand.Float64()*500+5)
 
-			case 1: // Event
-				evt := eventTypes[rand.Intn(len(eventTypes))]
-				subject = fmt.Sprintf("events.%s", evt)
-				data = fmt.Sprintf(`{"ts":"%s","event":"%s","user_id":"usr-%05d","session":"%08x"}`,
-					now, evt, rand.Intn(10000), rand.Uint32())
+		case 1: // Event
+			evt := eventTypes[rand.Intn(len(eventTypes))]
+			subject = fmt.Sprintf("events.%s", evt)
+			data = fmt.Sprintf(`{"ts":"%s","event":"%s","user_id":"usr-%05d","session":"%08x"}`,
+				now, evt, rand.Intn(10000), rand.Uint32())
 
-			case 2: // Log
-				level := levels[rand.Intn(len(levels))]
-				svc := services[rand.Intn(len(services))]
-				subject = fmt.Sprintf("logs.%s.%s", level, svc)
-				data = fmt.Sprintf(`{"ts":"%s","level":"%s","service":"%s","msg":"Request processed","trace":"%08x"}`,
-					now, level, svc, rand.Uint32())
+		case 2: // Log
+			level := levels[rand.Intn(len(levels))]
+			svc := services[rand.Intn(len(services))]
+			subject = fmt.Sprintf("logs.%s.%s", level, svc)
+			data = fmt.Sprintf(`{"ts":"%s","level":"%s","service":"%s","msg":"Request processed","trace":"%08x"}`,
+				now, level, svc, rand.Uint32())
 
-			case 3: // Metric
-				metric := metricNames[rand.Intn(len(metricNames))]
-				host := fmt.Sprintf("host-%02d", rand.Intn(10))
-				subject = fmt.Sprintf("metrics.%s.%s", host, metric)
-				data = fmt.Sprintf(`{"ts":"%s","metric":"%s","host":"%s","value":%.2f}`,
-					now, metric, host, rand.Float64()*100)
+		case 3: // Metric
+			metric := metricNames[rand.Intn(len(metricNames))]
+			host := fmt.Sprintf("host-%02d", rand.Intn(10))
+			subject = fmt.Sprintf("metrics.%s.%s", host, metric)
+			data = fmt.Sprintf(`{"ts":"%s","metric":"%s","host":"%s","value":%.2f}`,
+				now, metric, host, rand.Float64()*100)
 
-			case 4: // Notification
-				ch := channels[rand.Intn(len(channels))]
-				subject = fmt.Sprintf("notify.%s", ch)
-				data = fmt.Sprintf(`{"ts":"%s","channel":"%s","recipient":"user-%04d","priority":"%s"}`,
-					now, ch, rand.Intn(5000), []string{"low", "normal", "high"}[rand.Intn(3)])
-			}
+		case 4: // Notification
+			ch := channels[rand.Intn(len(channels))]
+			subject = fmt.Sprintf("notify.%s", ch)
+			data = fmt.Sprintf(`{"ts":"%s","channel":"%s","recipient":"user-%04d","priority":"%s"}`,
+				now, ch, rand.Intn(5000), []string{"low", "normal", "high"}[rand.Intn(3)])
+		}
 
-			// Publish to JetStream
-			if _, err := js.Publish(ctx, subject, []byte(data)); err != nil {
-				log.Printf("publish error: %v", err)
-				continue
-			}
+		if _, err := js.Publish(ctx, subject, []byte(data)); err != nil {
+			log.Printf("publish error: %v", err)
+			continue
+		}
 
-			msgCount++
-			if msgCount%100 == 0 {
-				fmt.Printf("Published %d messages...\n", msgCount)
-			}
+		msgCount++
+		phaseCount++
+		if msgCount%100 == 0 {
+			elapsed := time.Since(startTime).Seconds()
+			fmt.Printf("Published %d messages (%.1f msg/s avg)\n", msgCount, float64(msgCount)/elapsed)
+		}
+
+		// Transition to next phase
+		if phaseCount >= phaseLen {
+			nextPhase()
 		}
 	}
 }

@@ -8,6 +8,24 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// CommandOutputType defines how command output should be displayed.
+type CommandOutputType string
+
+const (
+	OutputLog       CommandOutputType = "log"
+	OutputJSON      CommandOutputType = "json"
+	OutputStreams   CommandOutputType = "streams"
+	OutputConsumers CommandOutputType = "consumers"
+)
+
+// CommandConfig defines a user-configured command.
+type CommandConfig struct {
+	Description string            `yaml:"description,omitempty"`
+	Cmd         string            `yaml:"cmd"`
+	Output      CommandOutputType `yaml:"output,omitempty"`
+	Confirm     bool              `yaml:"confirm,omitempty"`
+}
+
 // TLSConfig holds TLS connection settings for NATS.
 type TLSConfig struct {
 	Cert       string `yaml:"cert,omitempty"`
@@ -19,14 +37,15 @@ type TLSConfig struct {
 
 // ConnectionConfig holds NATS connection settings.
 type ConnectionConfig struct {
-	URL         string    `yaml:"url"`
-	TLS         TLSConfig `yaml:"tls,omitempty"`
-	Credentials string    `yaml:"credentials,omitempty"` // Path to .creds file
-	Token       string    `yaml:"token,omitempty"`
-	User        string    `yaml:"user,omitempty"`
-	Password    string    `yaml:"password,omitempty"`
-	NKey        string    `yaml:"nkey,omitempty"` // Path to nkey seed file
-	Domain      string    `yaml:"domain,omitempty"` // JetStream domain
+	URL         string                      `yaml:"url"`
+	TLS         TLSConfig                   `yaml:"tls,omitempty"`
+	Credentials string                      `yaml:"credentials,omitempty"` // Path to .creds file
+	Token       string                      `yaml:"token,omitempty"`
+	User        string                      `yaml:"user,omitempty"`
+	Password    string                      `yaml:"password,omitempty"`
+	NKey        string                      `yaml:"nkey,omitempty"` // Path to nkey seed file
+	Domain      string                      `yaml:"domain,omitempty"` // JetStream domain
+	Commands    map[string]CommandConfig     `yaml:"commands,omitempty"`
 }
 
 // ExpandEnv expands environment variables in sensitive fields.
@@ -43,11 +62,20 @@ func (c ConnectionConfig) ExpandEnv() ConnectionConfig {
 	}
 }
 
+// Bookmark represents a saved resource shortcut.
+type Bookmark struct {
+	Type   string `yaml:"type"`             // "stream", "consumer", "kv", "object"
+	Name   string `yaml:"name"`
+	Stream string `yaml:"stream,omitempty"` // for consumers
+}
+
 // Config represents the application configuration.
 type Config struct {
 	Theme         string                      `yaml:"theme"`
 	ActiveProfile string                      `yaml:"active_profile,omitempty"`
 	Profiles      map[string]ConnectionConfig `yaml:"profiles,omitempty"`
+	Commands      map[string]CommandConfig     `yaml:"commands,omitempty"`
+	Bookmarks     []Bookmark                   `yaml:"bookmarks,omitempty"`
 }
 
 // DefaultConfig returns a config with default values.
@@ -186,6 +214,70 @@ func (c *Config) ListProfiles() []string {
 	}
 	names := make([]string, 0, len(c.Profiles))
 	for name := range c.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ProfileExists returns true if a profile with the given name exists.
+func (c *Config) ProfileExists(name string) bool {
+	if c.Profiles == nil {
+		return false
+	}
+	_, ok := c.Profiles[name]
+	return ok
+}
+
+// GetMergedCommands returns global commands merged with profile-specific commands.
+// Profile commands override global commands with the same name.
+func (c *Config) GetMergedCommands(profileName string) map[string]CommandConfig {
+	merged := make(map[string]CommandConfig)
+	for name, cmd := range c.Commands {
+		merged[name] = cmd
+	}
+	if profile, ok := c.Profiles[profileName]; ok {
+		for name, cmd := range profile.Commands {
+			merged[name] = cmd
+		}
+	}
+	return merged
+}
+
+// AddBookmark adds a bookmark if it doesn't already exist.
+func (c *Config) AddBookmark(b Bookmark) bool {
+	for _, existing := range c.Bookmarks {
+		if existing.Type == b.Type && existing.Name == b.Name && existing.Stream == b.Stream {
+			return false // already exists
+		}
+	}
+	c.Bookmarks = append(c.Bookmarks, b)
+	return true
+}
+
+// RemoveBookmark removes a bookmark by index.
+func (c *Config) RemoveBookmark(index int) {
+	if index < 0 || index >= len(c.Bookmarks) {
+		return
+	}
+	c.Bookmarks = append(c.Bookmarks[:index], c.Bookmarks[index+1:]...)
+}
+
+// RemoveBookmarkMatch removes a bookmark that matches the given bookmark's type, name, and stream.
+func (c *Config) RemoveBookmarkMatch(b Bookmark) {
+	for i, existing := range c.Bookmarks {
+		if existing.Type == b.Type && existing.Name == b.Name && existing.Stream == b.Stream {
+			c.RemoveBookmark(i)
+			return
+		}
+	}
+}
+
+// ListCommandNames returns a sorted list of all command names for a profile.
+func (c *Config) ListCommandNames(profileName string) []string {
+	merged := c.GetMergedCommands(profileName)
+	names := make([]string, 0, len(merged))
+	for name := range merged {
 		names = append(names, name)
 	}
 	sort.Strings(names)
