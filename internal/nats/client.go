@@ -3,6 +3,7 @@ package nats
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -104,6 +105,29 @@ func (c *Client) ServerURL() string {
 	return c.nc.ConnectedUrl()
 }
 
+func (c *Client) ServerInfo() ServerInfo {
+	rtt, _ := c.nc.RTT()
+	stats := c.nc.Stats()
+	cid, _ := c.nc.GetClientID()
+
+	_, tlsErr := c.nc.TLSConnectionState()
+	isTLS := tlsErr == nil
+
+	return ServerInfo{
+		Name:       c.nc.ConnectedServerName(),
+		ID:         c.nc.ConnectedServerId(),
+		Version:    c.nc.ConnectedServerVersion(),
+		Cluster:    c.nc.ConnectedClusterName(),
+		Host:       c.nc.ConnectedAddr(),
+		RTT:        rtt,
+		TLS:        isTLS,
+		MaxPayload: c.nc.MaxPayload(),
+		ClientID:   cid,
+		Servers:    c.nc.Servers(),
+		Reconnects: stats.Reconnects,
+	}
+}
+
 // Account
 
 func (c *Client) AccountInfo(ctx context.Context) (*jetstream.AccountInfo, error) {
@@ -122,6 +146,14 @@ func (c *Client) ListStreams(ctx context.Context) ([]*jetstream.StreamInfo, erro
 		return streams, err
 	}
 	return streams, nil
+}
+
+func (c *Client) ListStreamsIter(ctx context.Context, fn func(info *jetstream.StreamInfo)) error {
+	lister := c.js.ListStreams(ctx)
+	for info := range lister.Info() {
+		fn(info)
+	}
+	return lister.Err()
 }
 
 func (c *Client) GetStream(ctx context.Context, name string) (jetstream.Stream, error) {
@@ -153,6 +185,18 @@ func (c *Client) StreamNameBySubject(ctx context.Context, subject string) (strin
 }
 
 // Stream operations
+
+func (c *Client) StreamSubjects(ctx context.Context, streamName string) (map[string]uint64, error) {
+	stream, err := c.js.Stream(ctx, streamName)
+	if err != nil {
+		return nil, err
+	}
+	info, err := stream.Info(ctx, jetstream.WithSubjectFilter(">"))
+	if err != nil {
+		return nil, err
+	}
+	return info.State.Subjects, nil
+}
 
 func (c *Client) PurgeStream(ctx context.Context, name string) error {
 	stream, err := c.js.Stream(ctx, name)
@@ -296,6 +340,39 @@ func (c *Client) GetKeyValue(ctx context.Context, bucket string) (jetstream.KeyV
 	return c.js.KeyValue(ctx, bucket)
 }
 
+func (c *Client) ListKeyValueKeys(ctx context.Context, bucket string) ([]string, error) {
+	kv, err := c.js.KeyValue(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+
+	// Keys()/ListKeys() use an internal watcher that can race on
+	// InitialConsumerPending, returning ErrNoKeysFound for non-empty
+	// buckets.  We check the bucket status and retry when this happens.
+	status, err := kv.Status(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting bucket status: %w", err)
+	}
+	expectKeys := status.Values() > 0
+
+	const maxAttempts = 3
+	for attempt := range maxAttempts {
+		keys, err := kv.Keys(ctx)
+		if err != nil {
+			if errors.Is(err, jetstream.ErrNoKeysFound) {
+				if expectKeys && attempt < maxAttempts-1 {
+					time.Sleep(50 * time.Millisecond)
+					continue
+				}
+				return nil, nil // genuinely empty
+			}
+			return nil, err
+		}
+		return keys, nil
+	}
+	return nil, nil
+}
+
 func (c *Client) CreateKeyValue(ctx context.Context, cfg jetstream.KeyValueConfig) (jetstream.KeyValue, error) {
 	return c.js.CreateKeyValue(ctx, cfg)
 }
@@ -437,6 +514,93 @@ func (c *Client) Reconnect(ctx context.Context, cfg config.ConnectionConfig) err
 	c.nc = nc
 	c.js = js
 	return nil
+}
+
+// WatchKeyValue watches all keys in a KV bucket for changes.
+func (c *Client) WatchKeyValue(ctx context.Context, bucket string, handler func(KVWatchEvent)) (KVWatcher, error) {
+	kv, err := c.js.KeyValue(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+
+	watcher, err := kv.WatchAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	go func() {
+		for entry := range watcher.Updates() {
+			if entry == nil {
+				continue
+			}
+			op := "PUT"
+			switch entry.Operation() {
+			case jetstream.KeyValueDelete:
+				op = "DELETE"
+			case jetstream.KeyValuePurge:
+				op = "PURGE"
+			}
+			handler(KVWatchEvent{
+				Key:       entry.Key(),
+				Operation: op,
+				Value:     entry.Value(),
+				Revision:  entry.Revision(),
+				Timestamp: entry.Created(),
+			})
+		}
+	}()
+
+	return &kvWatcherImpl{watcher: watcher}, nil
+}
+
+type kvWatcherImpl struct {
+	watcher jetstream.KeyWatcher
+}
+
+func (w *kvWatcherImpl) Stop() error {
+	return w.watcher.Stop()
+}
+
+// Request sends a request and waits for a reply.
+func (c *Client) Request(ctx context.Context, subject string, data []byte, headers map[string][]string, timeout time.Duration) (*RequestResponse, error) {
+	msg := natsclient.NewMsg(subject)
+	msg.Data = data
+	for k, vals := range headers {
+		for _, v := range vals {
+			msg.Header.Add(k, v)
+		}
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	resp, err := c.nc.RequestMsgWithContext(reqCtx, msg)
+	if err != nil {
+		return nil, err
+	}
+
+	respHeaders := make(map[string][]string)
+	for k, v := range resp.Header {
+		respHeaders[k] = v
+	}
+
+	return &RequestResponse{
+		Subject: resp.Subject,
+		Data:    resp.Data,
+		Headers: respHeaders,
+	}, nil
+}
+
+// Publish sends a message to the given subject with optional headers.
+func (c *Client) Publish(_ context.Context, subject string, data []byte, headers map[string][]string) error {
+	msg := natsclient.NewMsg(subject)
+	msg.Data = data
+	for k, vals := range headers {
+		for _, v := range vals {
+			msg.Header.Add(k, v)
+		}
+	}
+	return c.nc.PublishMsg(msg)
 }
 
 // Subscribe creates a subscription to the given subject pattern.

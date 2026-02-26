@@ -17,12 +17,29 @@ type RawMessage struct {
 	Time     time.Time
 }
 
+// ServerInfo bundles identity and configuration of the connected NATS server.
+type ServerInfo struct {
+	Name        string        // Server name (may be empty for older servers)
+	ID          string        // Unique server ID
+	Version     string        // Server version string, e.g. "2.10.4"
+	Cluster     string        // Cluster name (empty if standalone)
+	Host        string        // Server address (IP:port)
+	RTT         time.Duration // Last measured round-trip time
+	TLS         bool          // Whether the connection uses TLS
+	MaxPayload  int64         // Maximum message payload size in bytes
+	ClientID    uint64        // Client ID assigned by this server
+	Servers     []string      // All known server URLs (configured + discovered)
+	Domain      string        // JetStream domain (empty if default)
+	Reconnects  uint64        // Cumulative reconnect count
+}
+
 // Provider abstracts all NATS JetStream operations for the TUI.
 type Provider interface {
 	// Connection
 	Close()
 	IsConnected() bool
 	ConnectionStats() ConnectionStats
+	ServerInfo() ServerInfo
 	RTT() (time.Duration, error)
 	ServerURL() string
 	Reconnect(ctx context.Context, cfg config.ConnectionConfig) error
@@ -32,6 +49,7 @@ type Provider interface {
 
 	// Streams
 	ListStreams(ctx context.Context) ([]*jetstream.StreamInfo, error)
+	ListStreamsIter(ctx context.Context, fn func(info *jetstream.StreamInfo)) error
 	GetStream(ctx context.Context, name string) (jetstream.Stream, error)
 	GetStreamInfo(ctx context.Context, name string) (*jetstream.StreamInfo, error)
 	CreateStream(ctx context.Context, cfg jetstream.StreamConfig) (jetstream.Stream, error)
@@ -40,6 +58,7 @@ type Provider interface {
 	StreamNameBySubject(ctx context.Context, subject string) (string, error)
 
 	// Stream operations
+	StreamSubjects(ctx context.Context, streamName string) (map[string]uint64, error)
 	PurgeStream(ctx context.Context, name string) error
 	PurgeStreamSubject(ctx context.Context, name, subject string) error
 	GetMessage(ctx context.Context, streamName string, seq uint64) (*RawMessage, error)
@@ -57,6 +76,7 @@ type Provider interface {
 	// Key-Value
 	ListKeyValueStores(ctx context.Context) ([]jetstream.KeyValueStatus, error)
 	GetKeyValue(ctx context.Context, bucket string) (jetstream.KeyValue, error)
+	ListKeyValueKeys(ctx context.Context, bucket string) ([]string, error)
 	CreateKeyValue(ctx context.Context, cfg jetstream.KeyValueConfig) (jetstream.KeyValue, error)
 	DeleteKeyValue(ctx context.Context, bucket string) error
 
@@ -66,8 +86,17 @@ type Provider interface {
 	CreateObjectStore(ctx context.Context, cfg jetstream.ObjectStoreConfig) (jetstream.ObjectStore, error)
 	DeleteObjectStore(ctx context.Context, bucket string) error
 
+	// Key-Value Watch
+	WatchKeyValue(ctx context.Context, bucket string, handler func(KVWatchEvent)) (KVWatcher, error)
+
+	// Request/Reply
+	Request(ctx context.Context, subject string, data []byte, headers map[string][]string, timeout time.Duration) (*RequestResponse, error)
+
 	// Advisories
 	SubscribeAdvisories(ctx context.Context, handler func(Advisory)) error
+
+	// Publishing
+	Publish(ctx context.Context, subject string, data []byte, headers map[string][]string) error
 
 	// Message subscription
 	Subscribe(ctx context.Context, subject string, handler func(LiveMessage)) (Subscription, error)
@@ -113,6 +142,27 @@ const (
 	DeliverNew                             // Deliver only new messages (after subscription)
 	DeliverLastPerSubject                  // Deliver last message for each subject
 )
+
+// KVWatchEvent represents a key-value change event.
+type KVWatchEvent struct {
+	Key       string
+	Operation string // "PUT", "DELETE", "PURGE"
+	Value     []byte
+	Revision  uint64
+	Timestamp time.Time
+}
+
+// KVWatcher represents an active KV watch.
+type KVWatcher interface {
+	Stop() error
+}
+
+// RequestResponse holds a NATS request/reply response.
+type RequestResponse struct {
+	Subject string
+	Data    []byte
+	Headers map[string][]string
+}
 
 // Subscription represents an active message subscription.
 type Subscription interface {
