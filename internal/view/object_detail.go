@@ -2,10 +2,12 @@ package view
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync/atomic"
 	"time"
 
+	"github.com/atterpac/gnat/internal/clipboard"
 	"github.com/atterpac/jig/binding"
 	"github.com/atterpac/jig/components"
 	"github.com/atterpac/jig/theme"
@@ -35,13 +37,14 @@ func NewObjectDetail(app *App, bucket string) *ObjectDetail {
 	od := &ObjectDetail{
 		app:         app,
 		bucket:      bucket,
-		stopRefresh: make(chan struct{}),
+		stopRefresh: make(chan struct{}, 1),
 	}
 
 	t := theme.Get()
 
 	od.table = components.NewTable().
-		SetHeaders("NAME", "SIZE", "CHUNKS", "MODIFIED", "STATUS")
+		SetHeaders("NAME", "SIZE", "CHUNKS", "MODIFIED", "STATUS").
+		ConfigureEmpty(theme.IconFile, "No Objects", "")
 
 	od.detailView = tview.NewTextView().
 		SetDynamicColors(true)
@@ -86,15 +89,20 @@ func NewObjectDetail(app *App, bucket string) *ObjectDetail {
 		SetDetailTitle("Details").
 		SetMasterContent(od.table).
 		SetDetailContent(od.detailView).
-		SetRatio(0.6).
-		ConfigureEmpty("󰋼", "No Objects", "No objects found in this bucket")
+		SetRatio(0.6)
 
 	return od
+}
+
+func (od *ObjectDetail) CommandContext() CommandViewContext {
+	return CommandViewContext{Bucket: od.bucket}
 }
 
 func (od *ObjectDetail) Name() string { return od.bucket }
 
 func (od *ObjectDetail) Start() {
+	atomic.StoreInt32(&od.stopped, 0)
+	od.stopRefresh = make(chan struct{}, 1)
 	go od.initStore()
 }
 
@@ -109,6 +117,8 @@ func (od *ObjectDetail) Stop() {
 func (od *ObjectDetail) Hints() []components.KeyHint {
 	return []components.KeyHint{
 		{Key: "d", Description: "Delete"},
+		{Key: "y", Description: "Yank"},
+		{Key: "p", Description: "Preview"},
 		{Key: "r", Description: "Refresh"},
 		{Key: "Esc", Description: "Back"},
 	}
@@ -117,6 +127,36 @@ func (od *ObjectDetail) Hints() []components.KeyHint {
 func (od *ObjectDetail) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
 	return od.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
 		switch {
+		case event.Rune() == 'd':
+			if obj, ok := od.binding.GetSelectedValue(); ok && obj != nil && od.store != nil {
+				name := obj.Name
+				bucket := od.bucket
+				ConfirmDelete(od.app, "object", name, func() {
+					go func() {
+						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+						defer cancel()
+						if err := od.store.Delete(ctx, name); err != nil {
+							od.app.ShowError(err.Error())
+						} else {
+							od.app.ShowSuccess(fmt.Sprintf("Deleted object: %s from %s", name, bucket))
+							go od.loadObjects()
+						}
+					}()
+				})
+			}
+		case event.Rune() == 'y':
+			if obj, ok := od.binding.GetSelectedValue(); ok && obj != nil {
+				data, err := json.MarshalIndent(obj, "", "  ")
+				if err != nil {
+					od.app.ShowError(err.Error())
+				} else if err := clipboard.Copy(string(data)); err != nil {
+					od.app.ShowError("Clipboard: " + err.Error())
+				} else {
+					od.app.ShowSuccess("Copied object metadata: " + obj.Name)
+				}
+			}
+		case event.Rune() == 'p':
+			od.ToggleDetail()
 		case event.Rune() == 'r':
 			go od.loadObjects()
 		default:

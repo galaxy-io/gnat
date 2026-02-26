@@ -2,11 +2,13 @@ package view
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/atterpac/gnat/internal/clipboard"
 	"github.com/atterpac/jig/binding"
 	"github.com/atterpac/jig/components"
 	"github.com/atterpac/jig/theme"
@@ -35,7 +37,7 @@ func NewStreamDetail(app *App, name string) *StreamDetail {
 	sd := &StreamDetail{
 		app:         app,
 		streamName:  name,
-		stopRefresh: make(chan struct{}),
+		stopRefresh: make(chan struct{}, 1),
 	}
 
 	sd.configView = tview.NewTextView().SetDynamicColors(true)
@@ -81,9 +83,15 @@ func NewStreamDetail(app *App, name string) *StreamDetail {
 	return sd
 }
 
+func (sd *StreamDetail) CommandContext() CommandViewContext {
+	return CommandViewContext{Stream: sd.streamName}
+}
+
 func (sd *StreamDetail) Name() string { return sd.streamName }
 
 func (sd *StreamDetail) Start() {
+	atomic.StoreInt32(&sd.stopped, 0)
+	sd.stopRefresh = make(chan struct{}, 1)
 	go func() {
 		sd.loadInfo()
 		ticker := time.NewTicker(5 * time.Second)
@@ -110,8 +118,13 @@ func (sd *StreamDetail) Stop() {
 func (sd *StreamDetail) Hints() []components.KeyHint {
 	return []components.KeyHint{
 		{Key: "n", Description: "Consumers"},
+		{Key: "b", Description: "Browse"},
+		{Key: "s", Description: "Subjects"},
 		{Key: "w", Description: "Watch messages"},
+		{Key: "e", Description: "Edit"},
 		{Key: "p", Description: "Purge"},
+		{Key: "y", Description: "Yank"},
+		{Key: "x", Description: "Export"},
 		{Key: "r", Description: "Refresh"},
 		{Key: "Esc", Description: "Back"},
 	}
@@ -122,11 +135,42 @@ func (sd *StreamDetail) InputHandler() func(event *tcell.EventKey, setFocus func
 		switch event.Rune() {
 		case 'n':
 			sd.app.NavigateToConsumers(sd.streamName)
+		case 'b':
+			sd.app.NavigateToMessageBrowser(sd.streamName)
+		case 's':
+			go sd.showSubjectBreakdown()
 		case 'w':
 			// Watch messages - navigate to monitor with stream's first subject
 			if info := sd.info.Get(); info != nil && len(info.Config.Subjects) > 0 {
-				// Use the first subject pattern (usually a wildcard like "orders.>")
 				sd.app.NavigateToMessageMonitorWithSubject(info.Config.Subjects[0])
+			}
+		case 'e':
+			if info := sd.info.Get(); info != nil {
+				showStreamEditForm(sd.app, info, func() {
+					go sd.loadInfo()
+				})
+			}
+		case 'y':
+			if info := sd.info.Get(); info != nil {
+				data, err := json.MarshalIndent(info, "", "  ")
+				if err != nil {
+					sd.app.ShowError(err.Error())
+				} else if err := clipboard.Copy(string(data)); err != nil {
+					sd.app.ShowError("Clipboard: " + err.Error())
+				} else {
+					sd.app.ShowSuccess("Copied stream info: " + sd.streamName)
+				}
+			}
+		case 'x':
+			if info := sd.info.Get(); info != nil {
+				data, err := json.MarshalIndent(info.Config, "", "  ")
+				if err != nil {
+					sd.app.ShowError(err.Error())
+				} else if err := clipboard.Copy(string(data)); err != nil {
+					sd.app.ShowError("Clipboard: " + err.Error())
+				} else {
+					sd.app.ShowSuccess("Exported stream config to clipboard")
+				}
 			}
 		case 'r':
 			go sd.loadInfo()
@@ -313,6 +357,87 @@ func durationString(d time.Duration) string {
 		return "unlimited"
 	}
 	return d.String()
+}
+
+func (sd *StreamDetail) showSubjectBreakdown() {
+	if atomic.LoadInt32(&sd.stopped) == 1 {
+		return
+	}
+
+	provider := sd.app.Provider()
+	if provider == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	subjects, err := provider.StreamSubjects(ctx, sd.streamName)
+	if err != nil {
+		sd.app.QueueUpdateDraw(func() {
+			sd.app.ShowError("Subjects: " + err.Error())
+		})
+		return
+	}
+
+	if atomic.LoadInt32(&sd.stopped) == 1 {
+		return
+	}
+
+	// Sort by count descending
+	type subjectCount struct {
+		Subject string
+		Count   uint64
+	}
+	var sorted []subjectCount
+	var total uint64
+	for s, c := range subjects {
+		sorted = append(sorted, subjectCount{s, c})
+		total += c
+	}
+	for i := 0; i < len(sorted); i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[j].Count > sorted[i].Count {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+
+	sd.app.QueueUpdateDraw(func() {
+		table := components.NewTable().
+			SetHeaders("SUBJECT", "MESSAGES", "% OF TOTAL")
+
+		for _, sc := range sorted {
+			pct := float64(0)
+			if total > 0 {
+				pct = float64(sc.Count) / float64(total) * 100
+			}
+			table.AddRow(
+				sc.Subject,
+				formatNumber(sc.Count),
+				fmt.Sprintf("%.1f%%", pct),
+			)
+		}
+
+		table.SetOnSelect(func(row int) {
+			if row >= 0 && row < len(sorted) {
+				sd.app.NavigateToMessageMonitorWithSubject(sorted[row].Subject)
+			}
+		})
+
+		modal := components.NewModal(components.ModalConfig{
+			Title:  fmt.Sprintf("Subjects: %s (%d subjects)", sd.streamName, len(sorted)),
+			Width:  70,
+			Height: 20,
+		}).SetContent(table)
+
+		modal.SetHints([]components.KeyHint{
+			{Key: "Enter", Description: "Monitor subject"},
+			{Key: "Esc", Description: "Close"},
+		})
+
+		sd.app.app.Pages().Push(modal)
+	})
 }
 
 func discardString(d jetstream.DiscardPolicy) string {

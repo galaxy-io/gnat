@@ -2,11 +2,13 @@ package view
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/atterpac/gnat/internal/clipboard"
 	"github.com/atterpac/jig/binding"
 	"github.com/atterpac/jig/components"
 	"github.com/atterpac/jig/theme"
@@ -33,6 +35,13 @@ type ConsumerDetail struct {
 	lastDelivered uint64
 	lastAcked     uint64
 	lastSample    time.Time
+
+	// Lag history (Feature 7)
+	lagHistory []float64
+
+	// Ack staleness tracking (Feature 12)
+	lastAckFloor  uint64
+	lastAckChange time.Time
 }
 
 // NewConsumerDetail creates the consumer detail view.
@@ -41,7 +50,7 @@ func NewConsumerDetail(app *App, streamName, consumerName string) *ConsumerDetai
 		app:          app,
 		streamName:   streamName,
 		consumerName: consumerName,
-		stopRefresh:  make(chan struct{}),
+		stopRefresh:  make(chan struct{}, 1),
 	}
 
 	cd.configView = tview.NewTextView().SetDynamicColors(true)
@@ -74,9 +83,15 @@ func NewConsumerDetail(app *App, streamName, consumerName string) *ConsumerDetai
 	return cd
 }
 
+func (cd *ConsumerDetail) CommandContext() CommandViewContext {
+	return CommandViewContext{Stream: cd.streamName, Consumer: cd.consumerName}
+}
+
 func (cd *ConsumerDetail) Name() string { return cd.consumerName }
 
 func (cd *ConsumerDetail) Start() {
+	atomic.StoreInt32(&cd.stopped, 0)
+	cd.stopRefresh = make(chan struct{}, 1)
 	go func() {
 		cd.loadInfo()
 		ticker := time.NewTicker(2 * time.Second)
@@ -102,6 +117,9 @@ func (cd *ConsumerDetail) Stop() {
 
 func (cd *ConsumerDetail) Hints() []components.KeyHint {
 	return []components.KeyHint{
+		{Key: "e", Description: "Edit"},
+		{Key: "y", Description: "Yank"},
+		{Key: "x", Description: "Export"},
 		{Key: "r", Description: "Refresh"},
 		{Key: "Esc", Description: "Back"},
 	}
@@ -109,8 +127,37 @@ func (cd *ConsumerDetail) Hints() []components.KeyHint {
 
 func (cd *ConsumerDetail) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
 	return cd.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		if event.Rune() == 'r' {
-			go cd.loadInfo()
+		switch event.Rune() {
+		case 'e':
+			if info := cd.info.Get(); info != nil {
+				showConsumerEditForm(cd.app, cd.streamName, info, func() {
+					go cd.loadInfo()
+				})
+			}
+		case 'y':
+			if info := cd.info.Get(); info != nil {
+				data, err := json.MarshalIndent(info, "", "  ")
+				if err != nil {
+					cd.app.ShowError(err.Error())
+				} else if err := clipboard.Copy(string(data)); err != nil {
+					cd.app.ShowError("Clipboard: " + err.Error())
+				} else {
+					cd.app.ShowSuccess("Copied consumer info: " + cd.consumerName)
+				}
+			}
+		case 'x':
+			if info := cd.info.Get(); info != nil {
+				data, err := json.MarshalIndent(info.Config, "", "  ")
+				if err != nil {
+					cd.app.ShowError(err.Error())
+				} else if err := clipboard.Copy(string(data)); err != nil {
+					cd.app.ShowError("Clipboard: " + err.Error())
+				} else {
+					cd.app.ShowSuccess("Exported consumer config to clipboard")
+				}
+			}
+		case 'r':
+			cd.loadInfo()
 		}
 	})
 }
@@ -198,6 +245,35 @@ func (cd *ConsumerDetail) renderMetrics(info *jetstream.ConsumerInfo) {
 		errorRate = float64(info.NumRedelivered) / float64(info.Delivered.Consumer) * 100
 	}
 
+	// Track lag history
+	cd.lagHistory = append(cd.lagHistory, float64(lag))
+	if len(cd.lagHistory) > 60 {
+		cd.lagHistory = cd.lagHistory[len(cd.lagHistory)-60:]
+	}
+
+	// Track ack staleness
+	if info.AckFloor.Consumer != cd.lastAckFloor {
+		cd.lastAckFloor = info.AckFloor.Consumer
+		cd.lastAckChange = now
+	}
+	ackStaleness := ""
+	if !cd.lastAckChange.IsZero() {
+		staleDur := now.Sub(cd.lastAckChange)
+		ackStaleness = staleDur.Round(time.Second).String()
+		if staleDur > 30*time.Second {
+			ackStaleness = fmt.Sprintf("[yellow]%s[-]", ackStaleness)
+		}
+		if staleDur > 2*time.Minute {
+			ackStaleness = fmt.Sprintf("[red]%s[-]", ackStaleness)
+		}
+	}
+
+	// Lag sparkline (simple ASCII)
+	lagSpark := ""
+	if len(cd.lagHistory) > 1 {
+		lagSpark = " " + miniSparkline(cd.lagHistory, 20)
+	}
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "[%s]Delivered Seq:[-]   #%d\n", dim, info.Delivered.Consumer)
 	fmt.Fprintf(&b, "[%s]Ack Floor Seq:[-]   #%d\n", dim, info.AckFloor.Consumer)
@@ -208,8 +284,11 @@ func (cd *ConsumerDetail) renderMetrics(info *jetstream.ConsumerInfo) {
 	fmt.Fprintf(&b, "[%s]Ack Pending:[-]     %d\n", dim, info.NumAckPending)
 	fmt.Fprintf(&b, "[%s]Redelivered:[-]     %d\n", dim, info.NumRedelivered)
 	fmt.Fprintf(&b, "[%s]Waiting:[-]         %d\n", dim, info.NumWaiting)
-	fmt.Fprintf(&b, "[%s]Lag:[-]             %d\n", dim, lag)
+	fmt.Fprintf(&b, "[%s]Lag:[-]             %d%s\n", dim, lag, lagSpark)
 	fmt.Fprintf(&b, "[%s]Error Rate:[-]      %.3f%%\n", dim, errorRate)
+	if ackStaleness != "" {
+		fmt.Fprintf(&b, "[%s]Ack Staleness:[-]   %s\n", dim, ackStaleness)
+	}
 
 	cd.metricsView.SetText(b.String())
 }

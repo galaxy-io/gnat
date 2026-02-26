@@ -2,11 +2,16 @@ package view
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"sort"
+
+	"github.com/atterpac/gnat/internal/clipboard"
 	"github.com/atterpac/gnat/internal/nats"
 	"github.com/atterpac/jig/binding"
 	"github.com/atterpac/jig/components"
@@ -16,22 +21,157 @@ import (
 	"github.com/rivo/tview"
 )
 
-const maxAdvisories = 100
+const (
+	maxAdvisories  = 100
+	maxHistory     = 120 // 120 points × 2s interval = 4 minutes
+	pollInterval   = 2 * time.Second
+	streamInterval = 10 * time.Second
+)
+
+// rateHistory tracks rolling rate data for a single metric.
+type rateHistory struct {
+	values []float64
+}
+
+func (h *rateHistory) add(v float64) {
+	h.values = append(h.values, v)
+	if len(h.values) > maxHistory {
+		h.values = h.values[len(h.values)-maxHistory:]
+	}
+}
+
+func (h *rateHistory) last() float64 {
+	if len(h.values) == 0 {
+		return 0
+	}
+	return h.values[len(h.values)-1]
+}
+
+func (h *rateHistory) snapshot() []float64 {
+	out := make([]float64, len(h.values))
+	copy(out, h.values)
+	return out
+}
+
+// metricsSnapshot holds a point-in-time snapshot of all dashboard data.
+type metricsSnapshot struct {
+	// Rates
+	msgsInPerSec  float64
+	msgsOutPerSec float64
+	bytesInPerSec float64
+	bytesOutPerSec float64
+
+	// Rate histories (copies for safe binding)
+	msgsInHistory  []float64
+	msgsOutHistory []float64
+	bytesInHistory  []float64
+	bytesOutHistory []float64
+
+	// RTT history
+	rttHistory []float64
+
+	// Account info
+	memoryUsed  uint64
+	memoryLimit int64
+	storeUsed   uint64
+	storeLimit  int64
+	streams     int
+	maxStreams  int
+	consumers   int
+	maxConsumers int
+	apiTotal    uint64
+	apiErrors   uint64
+
+	// Per-stream breakdown
+	streamNames []string
+	streamMsgs  []float64
+
+	// Server info (fetched once per refresh, cheap call)
+	server nats.ServerInfo
+	domain string // JetStream domain from AccountInfo
+}
+
+// metricsCollector polls NATS stats and computes rates.
+type metricsCollector struct {
+	mu sync.Mutex
+
+	prevStats nats.ConnectionStats
+	prevTime  time.Time
+	hasFirst  bool
+
+	msgsIn  rateHistory
+	msgsOut rateHistory
+	bytesIn rateHistory
+	bytesOut rateHistory
+	rtt     rateHistory
+}
+
+func (mc *metricsCollector) recordStats(stats nats.ConnectionStats) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	now := time.Now()
+	if mc.hasFirst {
+		elapsed := now.Sub(mc.prevTime).Seconds()
+		if elapsed > 0 {
+			mc.msgsIn.add(float64(stats.InMsgs-mc.prevStats.InMsgs) / elapsed)
+			mc.msgsOut.add(float64(stats.OutMsgs-mc.prevStats.OutMsgs) / elapsed)
+			mc.bytesIn.add(float64(stats.InBytes-mc.prevStats.InBytes) / elapsed)
+			mc.bytesOut.add(float64(stats.OutBytes-mc.prevStats.OutBytes) / elapsed)
+		}
+	}
+	mc.prevStats = stats
+	mc.prevTime = now
+	mc.hasFirst = true
+}
+
+func (mc *metricsCollector) snapshot() (msgsIn, msgsOut, bytesIn, bytesOut rateHistory) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	return mc.msgsIn, mc.msgsOut, mc.bytesIn, mc.bytesOut
+}
 
 // Dashboard is the top-level overview of the NATS JetStream account.
 type Dashboard struct {
-	*components.Split
+	*tview.Flex
 	app *App
 
-	connectionPanel *components.Panel
-	connectionText  *tview.TextView
+	// Components - Row 1: Metric cards
+	cardMsgsIn  *components.MetricCard
+	cardMsgsOut *components.MetricCard
+	cardBytesIn *components.MetricCard
+	cardBytesOut *components.MetricCard
 
+	// Components - Row 1: RTT card
+	cardRTT *components.MetricCard
+
+	// Components - Row 2 left: Throughput graph
+	throughputGraph *components.LineGraph
+
+	// Components - Row 2 right: Gauges + compact cards
+	memoryGauge   *components.Gauge
+	storeGauge    *components.Gauge
+	cardStreams   *components.MetricCard
+	cardConsumers *components.MetricCard
+	cardAPI       *components.MetricCard
+
+	// Components - Row 2 right: Server info
+	serverText  *tview.TextView
+	serverPanel *components.Panel
+
+	// Components - Row 3 left: Bar chart
+	streamChart *components.BarChart
+
+	// Components - Row 3 right: Advisories
 	advisoryPanel *components.Panel
 	advisoryText  *tview.TextView
 
 	// Reactive state
-	connectionData *binding.Value[dashboardData]
-	advisories     *binding.Value[[]nats.Advisory]
+	metrics    *binding.Value[metricsSnapshot]
+	advisories *binding.Value[[]nats.Advisory]
+
+	// Data collection
+	collector *metricsCollector
 
 	stopRefresh chan struct{}
 	stopped     int32
@@ -41,19 +181,104 @@ type Dashboard struct {
 func NewDashboard(app *App) *Dashboard {
 	d := &Dashboard{
 		app:         app,
-		stopRefresh: make(chan struct{}),
+		stopRefresh: make(chan struct{}, 1),
+		collector:   &metricsCollector{},
 	}
 
-	d.connectionText = tview.NewTextView().
+	d.buildComponents()
+	d.buildLayout()
+	d.setupBindings()
+	return d
+}
+
+func (d *Dashboard) buildComponents() {
+	// Row 1: Metric cards
+	d.cardMsgsIn = components.NewMetricCard().
+		SetLabel("Msgs In/s").
+		SetValue("0").
+		SetShowSpark(true)
+
+	d.cardMsgsOut = components.NewMetricCard().
+		SetLabel("Msgs Out/s").
+		SetValue("0").
+		SetShowSpark(true)
+
+	d.cardBytesIn = components.NewMetricCard().
+		SetLabel("Bytes In/s").
+		SetValue("0 B").
+		SetShowSpark(true)
+
+	d.cardBytesOut = components.NewMetricCard().
+		SetLabel("Bytes Out/s").
+		SetValue("0 B").
+		SetShowSpark(true)
+
+	d.cardRTT = components.NewMetricCard().
+		SetLabel("RTT").
+		SetValue("-").
+		SetShowSpark(true)
+
+	// Row 2 left: Line graph
+	d.throughputGraph = components.NewLineGraph().
+		SetTitle("Message Throughput").
+		SetStyle(components.LineGraphSolid).
+		SetShowGrid(true).
+		SetShowLegend(true).
+		SetAutoScale(true).
+		SetYAxis(components.AxisConfig{
+			Show:       true,
+			LabelCount: 5,
+			Format:     "%.0f",
+		})
+
+	// Row 2 right: Gauges
+	d.memoryGauge = components.NewGauge().
+		SetLabel("Memory").
+		SetValue(0)
+
+	d.storeGauge = components.NewGauge().
+		SetLabel("Store").
+		SetValue(0)
+
+	// Compact metric cards for JetStream stats
+	d.cardStreams = components.NewMetricCard().
+		SetLabel("Streams").
+		SetValue("0").
+		SetCompact(true).
+		SetShowBorder(false)
+
+	d.cardConsumers = components.NewMetricCard().
+		SetLabel("Consumers").
+		SetValue("0").
+		SetCompact(true).
+		SetShowBorder(false)
+
+	d.cardAPI = components.NewMetricCard().
+		SetLabel("API").
+		SetValue("0 / 0 err").
+		SetCompact(true).
+		SetShowBorder(false)
+
+	// Server info panel
+	d.serverText = tview.NewTextView().
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignLeft)
-	d.connectionText.SetBackgroundColor(theme.Get().Bg())
-	theme.Register(d.connectionText)
+	d.serverText.SetBackgroundColor(theme.Get().Bg())
+	theme.Register(d.serverText)
 
-	d.connectionPanel = components.NewPanel().
-		SetTitle("Connection").
-		SetContent(d.connectionText)
+	d.serverPanel = components.NewPanel().
+		SetTitle("Server").
+		SetContent(d.serverText)
 
+	// Row 3 left: Bar chart
+	d.streamChart = components.NewBarChart().
+		SetTitle("Per-Stream Messages").
+		SetOrientation(components.BarHorizontal).
+		SetShowValues(true).
+		SetShowLabels(true).
+		SetValueFormat("%.0f")
+
+	// Row 3 right: Advisories
 	d.advisoryText = tview.NewTextView().
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignLeft).
@@ -64,45 +289,81 @@ func NewDashboard(app *App) *Dashboard {
 	d.advisoryPanel = components.NewPanel().
 		SetTitle("Advisories").
 		SetContent(d.advisoryText)
+}
 
-	// Set up reactive bindings
-	d.connectionData = binding.NewValue(dashboardData{})
-	d.connectionData.BindToWithDraw(func(data dashboardData) {
-		d.renderConnection(data)
+func (d *Dashboard) buildLayout() {
+	// Row 1: 5 metric cards side by side
+	row1 := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(d.cardMsgsIn, 0, 1, false).
+		AddItem(d.cardMsgsOut, 0, 1, false).
+		AddItem(d.cardBytesIn, 0, 1, false).
+		AddItem(d.cardBytesOut, 0, 1, false).
+		AddItem(d.cardRTT, 0, 1, false)
+
+	// Row 2 right: server info + JetStream gauges/cards stacked
+	jsPanel := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(d.memoryGauge, 5, 0, false).
+		AddItem(d.storeGauge, 5, 0, false).
+		AddItem(d.cardStreams, 1, 0, false).
+		AddItem(d.cardConsumers, 1, 0, false).
+		AddItem(d.cardAPI, 1, 0, false)
+	jsPanel.SetBackgroundColor(theme.Get().Bg())
+	theme.Register(jsPanel)
+
+	jsPanelWrapped := components.NewPanel().
+		SetTitle("JetStream").
+		SetContent(jsPanel)
+
+	rightPanel := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(d.serverPanel, 0, 1, false).
+		AddItem(jsPanelWrapped, 0, 1, false)
+	rightPanel.SetBackgroundColor(theme.Get().Bg())
+	theme.Register(rightPanel)
+
+	// Row 2: graph (left) + server+JetStream (right)
+	row2 := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(d.throughputGraph, 0, 3, false).
+		AddItem(nil, 1, 0, false).
+		AddItem(rightPanel, 0, 1, false)
+
+	// Row 3: bar chart (left) + advisories (right)
+	row3 := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(d.streamChart, 0, 1, false).
+		AddItem(d.advisoryPanel, 0, 1, false)
+
+	// Main layout: three rows stacked vertically
+	d.Flex = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(row1, 6, 0, false).
+		AddItem(row2, 0, 3, false).
+		AddItem(row3, 0, 2, false)
+	d.Flex.SetBackgroundColor(theme.Get().Bg())
+	theme.Register(d.Flex)
+}
+
+func (d *Dashboard) setupBindings() {
+	d.metrics = binding.NewValue(metricsSnapshot{})
+	d.metrics.BindToWithDraw(func(snap metricsSnapshot) {
+		d.renderMetrics(snap)
 	})
 
 	d.advisories = binding.NewValue([]nats.Advisory{})
 	d.advisories.BindToWithDraw(func(advs []nats.Advisory) {
 		d.renderAdvisories(advs)
 	})
-
-	// Use Split for resizable panes (Ctrl+Arrow to resize)
-	d.Split = components.NewSplit().
-		SetDirection(components.SplitHorizontal).
-		SetRatio(0.33).
-		SetLeft(d.connectionPanel).
-		SetRight(d.advisoryPanel)
-
-	return d
 }
+
+func (d *Dashboard) CommandContext() CommandViewContext { return CommandViewContext{} }
 
 func (d *Dashboard) Name() string { return "Dashboard" }
 
 func (d *Dashboard) Start() {
+	// Reset lifecycle state so the dashboard works after being re-pushed
+	// (e.g. escaping back from a sub-view calls Stop then Start again).
+	atomic.StoreInt32(&d.stopped, 0)
+	d.stopRefresh = make(chan struct{}, 1)
+
 	d.subscribeAdvisories()
-	go func() {
-		d.refresh()
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-d.stopRefresh:
-				return
-			case <-ticker.C:
-				d.refresh()
-			}
-		}
-	}()
+	go d.pollLoop()
 }
 
 func (d *Dashboard) Stop() {
@@ -119,6 +380,7 @@ func (d *Dashboard) Hints() []components.KeyHint {
 		{Key: "k", Description: "KV Stores"},
 		{Key: "o", Description: "Object Stores"},
 		{Key: "m", Description: "Monitor"},
+		{Key: "y", Description: "Yank"},
 		{Key: "r", Description: "Refresh"},
 		{Key: "q", Description: "Quit"},
 	}
@@ -135,10 +397,310 @@ func (d *Dashboard) InputHandler() func(event *tcell.EventKey, setFocus func(p t
 			d.app.NavigateToObjectStores()
 		case 'm':
 			d.app.NavigateToMessageMonitor()
+		case 'y':
+			snap := d.metrics.Get()
+			info := map[string]interface{}{
+				"server":  snap.server,
+				"streams": snap.streams,
+				"consumers": snap.consumers,
+				"memory_used": snap.memoryUsed,
+				"store_used":  snap.storeUsed,
+				"api_total":   snap.apiTotal,
+				"api_errors":  snap.apiErrors,
+				"domain":      snap.domain,
+			}
+			data, err := json.MarshalIndent(info, "", "  ")
+			if err != nil {
+				d.app.ShowError(err.Error())
+			} else if err := clipboard.Copy(string(data)); err != nil {
+				d.app.ShowError("Clipboard: " + err.Error())
+			} else {
+				d.app.ShowSuccess("Copied server info")
+			}
 		case 'r':
 			go d.refresh()
 		}
 	})
+}
+
+// pollLoop runs the 2-second stats ticker and 10-second streams ticker.
+func (d *Dashboard) pollLoop() {
+	// Kick off the first stats and streams fetch concurrently.
+	d.refresh()
+	go d.refreshStreams()
+
+	statsTicker := time.NewTicker(pollInterval)
+	streamsTicker := time.NewTicker(streamInterval)
+	defer statsTicker.Stop()
+	defer streamsTicker.Stop()
+
+	for {
+		select {
+		case <-d.stopRefresh:
+			return
+		case <-statsTicker.C:
+			d.refresh()
+		case <-streamsTicker.C:
+			d.refreshStreams()
+		}
+	}
+}
+
+func (d *Dashboard) refresh() {
+	provider := d.app.Provider()
+	if provider == nil {
+		return
+	}
+
+	if atomic.LoadInt32(&d.stopped) == 1 {
+		return
+	}
+
+	// Record connection stats and compute rates
+	stats := provider.ConnectionStats()
+	d.collector.recordStats(stats)
+
+	// Get server info (cheap — reads cached connection state)
+	srvInfo := provider.ServerInfo()
+
+	// Get account info
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	info, _ := provider.AccountInfo(ctx)
+
+	if atomic.LoadInt32(&d.stopped) == 1 {
+		return
+	}
+
+	// Record RTT
+	d.collector.mu.Lock()
+	d.collector.rtt.add(float64(srvInfo.RTT.Microseconds()))
+	rttHist := d.collector.rtt.snapshot()
+	d.collector.mu.Unlock()
+
+	// Build snapshot
+	msgsIn, msgsOut, bytesIn, bytesOut := d.collector.snapshot()
+
+	snap := metricsSnapshot{
+		msgsInPerSec:   msgsIn.last(),
+		msgsOutPerSec:  msgsOut.last(),
+		bytesInPerSec:  bytesIn.last(),
+		bytesOutPerSec: bytesOut.last(),
+		msgsInHistory:  msgsIn.snapshot(),
+		msgsOutHistory: msgsOut.snapshot(),
+		bytesInHistory:  bytesIn.snapshot(),
+		bytesOutHistory: bytesOut.snapshot(),
+		rttHistory:     rttHist,
+		server:         srvInfo,
+	}
+
+	if info != nil {
+		snap.memoryUsed = info.Memory
+		snap.memoryLimit = info.Limits.MaxMemory
+		snap.storeUsed = info.Store
+		snap.storeLimit = info.Limits.MaxStore
+		snap.streams = info.Streams
+		snap.maxStreams = info.Limits.MaxStreams
+		snap.consumers = info.Consumers
+		snap.maxConsumers = info.Limits.MaxConsumers
+		snap.apiTotal = info.API.Total
+		snap.apiErrors = info.API.Errors
+		snap.domain = info.Domain
+	}
+
+	// Preserve stream data from previous snapshot
+	prev := d.metrics.Get()
+	if len(prev.streamNames) > 0 && len(snap.streamNames) == 0 {
+		snap.streamNames = prev.streamNames
+		snap.streamMsgs = prev.streamMsgs
+	}
+
+	d.metrics.SetAndDraw(snap)
+}
+
+func (d *Dashboard) refreshStreams() {
+	provider := d.app.Provider()
+	if provider == nil {
+		return
+	}
+
+	if atomic.LoadInt32(&d.stopped) == 1 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Clear previous stream data so the chart starts fresh for this iteration.
+	d.metrics.UpdateAndDraw(func(snap metricsSnapshot) metricsSnapshot {
+		snap.streamNames = nil
+		snap.streamMsgs = nil
+		return snap
+	})
+
+	// Stream results incrementally — the bar chart updates after each stream
+	// arrives rather than waiting for the full paginated listing to complete.
+	_ = provider.ListStreamsIter(ctx, func(info *jetstream.StreamInfo) {
+		if atomic.LoadInt32(&d.stopped) == 1 {
+			return
+		}
+		d.metrics.UpdateAndDraw(func(snap metricsSnapshot) metricsSnapshot {
+			snap.streamNames = append(snap.streamNames, info.Config.Name)
+			snap.streamMsgs = append(snap.streamMsgs, float64(info.State.Msgs))
+			return snap
+		})
+	})
+}
+
+func (d *Dashboard) renderMetrics(snap metricsSnapshot) {
+	// Row 1: Update metric cards
+	d.cardMsgsIn.
+		SetValue(formatRate(snap.msgsInPerSec)).
+		SetSparkline(snap.msgsInHistory).
+		SetTrend(rateTrend(snap.msgsInHistory), "", true)
+
+	d.cardMsgsOut.
+		SetValue(formatRate(snap.msgsOutPerSec)).
+		SetSparkline(snap.msgsOutHistory).
+		SetTrend(rateTrend(snap.msgsOutHistory), "", true)
+
+	d.cardBytesIn.
+		SetValue(formatBytesRate(snap.bytesInPerSec)).
+		SetSparkline(snap.bytesInHistory).
+		SetTrend(rateTrend(snap.bytesInHistory), "", true)
+
+	d.cardBytesOut.
+		SetValue(formatBytesRate(snap.bytesOutPerSec)).
+		SetSparkline(snap.bytesOutHistory).
+		SetTrend(rateTrend(snap.bytesOutHistory), "", true)
+
+	// RTT card
+	if len(snap.rttHistory) > 0 {
+		lastRTT := snap.rttHistory[len(snap.rttHistory)-1]
+		rttLabel := fmt.Sprintf("%.0fus", lastRTT)
+		if lastRTT >= 1000 {
+			rttLabel = fmt.Sprintf("%.1fms", lastRTT/1000)
+		}
+		d.cardRTT.
+			SetValue(rttLabel).
+			SetSparkline(snap.rttHistory).
+			SetTrend(rateTrend(snap.rttHistory), "", false)
+	}
+
+	// Row 2 left: Update throughput graph
+	d.throughputGraph.SetSeries(
+		components.DataSeries{
+			Label:  "In msgs/s",
+			Values: snap.msgsInHistory,
+			Color:  theme.Get().Success(),
+		},
+		components.DataSeries{
+			Label:  "Out msgs/s",
+			Values: snap.msgsOutHistory,
+			Color:  theme.Get().Warning(),
+		},
+	)
+
+	// Row 2 right: Update gauges
+	// Limits of -1 mean unlimited in NATS; treat as no cap.
+	if snap.memoryLimit > 0 {
+		d.memoryGauge.SetValue(float64(snap.memoryUsed) / float64(snap.memoryLimit))
+		d.memoryGauge.SetLabel(fmt.Sprintf("Memory %s / %s", formatBytes(snap.memoryUsed), formatBytes(uint64(snap.memoryLimit))))
+	} else if snap.memoryLimit == -1 {
+		d.memoryGauge.SetValue(0)
+		d.memoryGauge.SetLabel(fmt.Sprintf("Memory %s / unlimited", formatBytes(snap.memoryUsed)))
+	} else {
+		d.memoryGauge.SetValue(0)
+		d.memoryGauge.SetLabel(fmt.Sprintf("Memory %s", formatBytes(snap.memoryUsed)))
+	}
+	if snap.storeLimit > 0 {
+		d.storeGauge.SetValue(float64(snap.storeUsed) / float64(snap.storeLimit))
+		d.storeGauge.SetLabel(fmt.Sprintf("Store %s / %s", formatBytes(snap.storeUsed), formatBytes(uint64(snap.storeLimit))))
+	} else if snap.storeLimit == -1 {
+		d.storeGauge.SetValue(0)
+		d.storeGauge.SetLabel(fmt.Sprintf("Store %s / unlimited", formatBytes(snap.storeUsed)))
+	} else {
+		d.storeGauge.SetValue(0)
+		d.storeGauge.SetLabel(fmt.Sprintf("Store %s", formatBytes(snap.storeUsed)))
+	}
+
+	// Row 2 right: Update compact cards
+	if snap.maxStreams > 0 {
+		d.cardStreams.SetValue(fmt.Sprintf("%d / %d", snap.streams, snap.maxStreams))
+	} else {
+		d.cardStreams.SetValue(fmt.Sprintf("%d", snap.streams))
+	}
+	if snap.maxConsumers > 0 {
+		d.cardConsumers.SetValue(fmt.Sprintf("%d / %d", snap.consumers, snap.maxConsumers))
+	} else {
+		d.cardConsumers.SetValue(fmt.Sprintf("%d", snap.consumers))
+	}
+	d.cardAPI.SetValue(fmt.Sprintf("%d / %d err", snap.apiTotal, snap.apiErrors))
+
+	// Server info panel
+	d.renderServerInfo(snap)
+
+	// Row 3 left: Update bar chart (sorted by most messages first)
+	if len(snap.streamNames) > 0 {
+		items := make([]components.BarItem, len(snap.streamNames))
+		for i, name := range snap.streamNames {
+			items[i] = components.BarItem{
+				Label: name,
+				Value: snap.streamMsgs[i],
+			}
+		}
+		sort.Slice(items, func(i, j int) bool {
+			return items[i].Value > items[j].Value
+		})
+		d.streamChart.SetItems(items...)
+	}
+}
+
+func (d *Dashboard) renderServerInfo(snap metricsSnapshot) {
+	dim := theme.TagFgDim()
+	accent := theme.TagAccent()
+	srv := snap.server
+
+	connStatus := "[green]Connected[-]"
+	if !srv.TLS {
+		connStatus += fmt.Sprintf(" [%s](plain)[-]", dim)
+	} else {
+		connStatus += fmt.Sprintf(" [%s](TLS)[-]", dim)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[%s]Status:[-]   %s\n", dim, connStatus)
+
+	name := srv.Name
+	if name == "" {
+		name = srv.ID
+	}
+	if name != "" {
+		fmt.Fprintf(&b, "[%s]Server:[-]   [%s]%s[-]\n", dim, accent, name)
+	}
+	if srv.Version != "" {
+		fmt.Fprintf(&b, "[%s]Version:[-]  [%s]%s[-]\n", dim, accent, srv.Version)
+	}
+	if srv.Cluster != "" {
+		fmt.Fprintf(&b, "[%s]Cluster:[-]  [%s]%s[-]\n", dim, accent, srv.Cluster)
+	}
+	if snap.domain != "" {
+		fmt.Fprintf(&b, "[%s]Domain:[-]   [%s]%s[-]\n", dim, accent, snap.domain)
+	}
+	fmt.Fprintf(&b, "[%s]RTT:[-]      [%s]%s[-]\n", dim, accent, srv.RTT.Round(time.Microsecond))
+	fmt.Fprintf(&b, "[%s]Payload:[-]  [%s]%s[-]\n", dim, accent, formatBytes(uint64(srv.MaxPayload)))
+	if srv.ClientID > 0 {
+		fmt.Fprintf(&b, "[%s]Client:[-]   [%s]%d[-]\n", dim, accent, srv.ClientID)
+	}
+	if len(srv.Servers) > 1 {
+		fmt.Fprintf(&b, "[%s]Nodes:[-]    [%s]%d[-]\n", dim, accent, len(srv.Servers))
+	}
+	if srv.Reconnects > 0 {
+		fmt.Fprintf(&b, "[%s]Reconns:[-]  [yellow]%d[-]\n", dim, srv.Reconnects)
+	}
+
+	d.serverText.SetText(b.String())
 }
 
 func (d *Dashboard) subscribeAdvisories() {
@@ -149,7 +711,6 @@ func (d *Dashboard) subscribeAdvisories() {
 
 	ctx := context.Background()
 	_ = provider.SubscribeAdvisories(ctx, func(adv nats.Advisory) {
-		// Don't process advisories after dashboard is stopped
 		if atomic.LoadInt32(&d.stopped) == 1 {
 			return
 		}
@@ -174,7 +735,6 @@ func (d *Dashboard) renderAdvisories(advisories []nats.Advisory) {
 	warn := theme.TagWarning()
 	var b strings.Builder
 
-	// Show newest first
 	for i := len(advisories) - 1; i >= 0; i-- {
 		adv := advisories[i]
 		ts := adv.Timestamp.Format("15:04:05")
@@ -198,98 +758,32 @@ func (d *Dashboard) renderAdvisories(advisories []nats.Advisory) {
 	d.advisoryText.ScrollToBeginning()
 }
 
-// dashboardData holds all data needed for the dashboard refresh.
-type dashboardData struct {
-	info      *jetstream.AccountInfo
-	stats     nats.ConnectionStats
-	rtt       time.Duration
-	url       string
-	connected bool
+// --- Formatting helpers ---
+
+func formatRate(v float64) string {
+	if v < 1 {
+		return fmt.Sprintf("%.1f", v)
+	}
+	return formatNumber(uint64(v))
 }
 
-func (d *Dashboard) refresh() {
-	provider := d.app.Provider()
-	if provider == nil {
-		return
-	}
-
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		info, err := provider.AccountInfo(ctx)
-
-		// Check if view was stopped while fetching
-		if atomic.LoadInt32(&d.stopped) == 1 {
-			return
-		}
-
-		rtt, _ := provider.RTT()
-		data := dashboardData{
-			info:      info,
-			stats:     provider.ConnectionStats(),
-			rtt:       rtt,
-			url:       provider.ServerURL(),
-			connected: provider.IsConnected(),
-		}
-
-		if err != nil {
-			// Still update with connection stats, but note error
-			d.connectionData.SetAndDraw(data)
-			d.app.QueueUpdateDraw(func() {
-				d.connectionText.SetText(d.connectionText.GetText(false) +
-					fmt.Sprintf("\n[red]Account error: %v[-]", err))
-			})
-		} else {
-			d.connectionData.SetAndDraw(data)
-		}
-	}()
+func formatBytesRate(v float64) string {
+	return formatBytes(uint64(v)) + "/s"
 }
 
-func (d *Dashboard) renderConnection(data dashboardData) {
-	dim := theme.TagFgDim()
-	accent := theme.TagAccent()
-
-	connStatus := "[green]Connected[-]"
-	if !data.connected {
-		connStatus = "[red]Disconnected[-]"
+func rateTrend(history []float64) components.Trend {
+	if len(history) < 2 {
+		return components.TrendNeutral
 	}
-
-	var accountInfo string
-	if data.info != nil {
-		accountInfo = fmt.Sprintf(
-			"\n\n[%s]── Account ──[-]\n"+
-				"[%s]Memory:[-]      [%s]%s[-]\n"+
-				"[%s]Store:[-]       [%s]%s[-]\n"+
-				"[%s]API Total:[-]   %d\n"+
-				"[%s]API Errors:[-]  %d\n"+
-				"[%s]Streams:[-]     %d / %d\n"+
-				"[%s]Consumers:[-]   %d / %d",
-			dim,
-			dim, accent, formatBytes(data.info.Memory),
-			dim, accent, formatBytes(data.info.Store),
-			dim, data.info.API.Total,
-			dim, data.info.API.Errors,
-			dim, data.info.Streams, data.info.Limits.MaxStreams,
-			dim, data.info.Consumers, data.info.Limits.MaxConsumers,
-		)
+	curr := history[len(history)-1]
+	prev := history[len(history)-2]
+	if curr > prev*1.05 {
+		return components.TrendUp
 	}
-
-	d.connectionText.SetText(fmt.Sprintf(
-		"[%s]Status:[-]      %s\n"+
-			"[%s]Server:[-]      %s\n"+
-			"[%s]RTT:[-]         %s\n"+
-			"[%s]InMsgs:[-]      %s\n"+
-			"[%s]OutMsgs:[-]     %s\n"+
-			"[%s]Reconnects:[-]  %d%s",
-		dim, connStatus,
-		dim, data.url,
-		dim, data.rtt.Round(time.Microsecond),
-		dim, formatNumber(data.stats.InMsgs),
-		dim, formatNumber(data.stats.OutMsgs),
-		dim, data.stats.Reconnects,
-		accountInfo,
-	))
+	if curr < prev*0.95 {
+		return components.TrendDown
+	}
+	return components.TrendNeutral
 }
 
 func formatBytes(b uint64) string {

@@ -2,9 +2,11 @@ package view
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
+	"github.com/atterpac/gnat/internal/clipboard"
 	"github.com/atterpac/jig/binding"
 	"github.com/atterpac/jig/components"
 	"github.com/atterpac/jig/theme"
@@ -31,7 +33,8 @@ func NewKVList(app *App) *KVList {
 	}
 
 	kl.table = components.NewTable().
-		SetHeaders("BUCKET", "KEYS", "BYTES", "HISTORY", "TTL", "COMPRESSED")
+		SetHeaders("BUCKET", "KEYS", "BYTES", "HISTORY", "TTL", "COMPRESSED").
+		ConfigureEmpty(theme.IconKey, "No KV Stores", "")
 
 	kl.preview = tview.NewTextView().
 		SetDynamicColors(true)
@@ -77,6 +80,16 @@ func NewKVList(app *App) *KVList {
 				kl.app.QueueUpdateDraw(func() {
 					kl.preview.SetText(fmt.Sprintf("[red]Error: %v[-]", err))
 				})
+				return
+			}
+			if len(data) > 0 {
+				kl.app.QueueUpdateDraw(func() {
+					row, _ := kl.table.GetSelection()
+					if row < 1 {
+						row = 1
+					}
+					kl.updatePreview(row)
+				})
 			}
 		})
 
@@ -89,10 +102,16 @@ func NewKVList(app *App) *KVList {
 		SetDetailTitle("Preview").
 		SetMasterContent(kl.table).
 		SetDetailContent(kl.preview).
-		SetRatio(0.6).
-		ConfigureEmpty("󰋼", "No KV Stores", "No key-value stores found")
+		SetRatio(0.6)
 
 	return kl
+}
+
+func (kl *KVList) CommandContext() CommandViewContext {
+	if s, ok := kl.binding.GetSelectedValue(); ok {
+		return CommandViewContext{Bucket: s.Bucket()}
+	}
+	return CommandViewContext{}
 }
 
 func (kl *KVList) Name() string { return "KV Stores" }
@@ -110,6 +129,11 @@ func (kl *KVList) Hints() []components.KeyHint {
 		{Key: "Enter", Description: "Browse Keys"},
 		{Key: "c", Description: "Create"},
 		{Key: "d", Description: "Delete"},
+		{Key: "y", Description: "Yank"},
+		{Key: "w", Description: "Watch"},
+		{Key: "Space", Description: "Select"},
+		{Key: "D", Description: "Bulk Delete"},
+		{Key: "p", Description: "Preview"},
 		{Key: "r", Description: "Refresh"},
 	}
 }
@@ -117,6 +141,53 @@ func (kl *KVList) Hints() []components.KeyHint {
 func (kl *KVList) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
 	return kl.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
 		switch {
+		case event.Rune() == 'c':
+			showKVCreateForm(kl.app, func() {
+				kl.binding.RefreshAsync()
+			})
+		case event.Rune() == 'd':
+			if s, ok := kl.binding.GetSelectedValue(); ok {
+				bucket := s.Bucket()
+				ConfirmDelete(kl.app, "KV bucket", bucket, func() {
+					go func() {
+						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+						defer cancel()
+						if err := kl.app.Provider().DeleteKeyValue(ctx, bucket); err != nil {
+							kl.app.ShowError(err.Error())
+						} else {
+							kl.app.ShowSuccess("Deleted KV bucket: " + bucket)
+							kl.binding.RefreshAsync()
+						}
+					}()
+				})
+			}
+		case event.Rune() == 'y':
+			if s, ok := kl.binding.GetSelectedValue(); ok {
+				info := map[string]interface{}{
+					"bucket":     s.Bucket(),
+					"keys":       s.Values(),
+					"bytes":      s.Bytes(),
+					"history":    s.History(),
+					"ttl":        s.TTL().String(),
+					"compressed": s.IsCompressed(),
+				}
+				data, err := json.MarshalIndent(info, "", "  ")
+				if err != nil {
+					kl.app.ShowError(err.Error())
+				} else if err := clipboard.Copy(string(data)); err != nil {
+					kl.app.ShowError("Clipboard: " + err.Error())
+				} else {
+					kl.app.ShowSuccess("Copied KV status: " + s.Bucket())
+				}
+			}
+		case event.Rune() == 'D':
+			kl.bulkDelete()
+		case event.Rune() == 'w':
+			if s, ok := kl.binding.GetSelectedValue(); ok {
+				kl.app.NavigateToKVWatch(s.Bucket())
+			}
+		case event.Rune() == 'p':
+			kl.ToggleDetail()
 		case event.Rune() == 'r':
 			kl.binding.RefreshAsync()
 		default:
@@ -124,6 +195,29 @@ func (kl *KVList) InputHandler() func(event *tcell.EventKey, setFocus func(p tvi
 				handler(event, setFocus)
 			}
 		}
+	})
+}
+
+func (kl *KVList) bulkDelete() {
+	keys := kl.table.GetSelectedKeys()
+	if len(keys) == 0 {
+		kl.app.ShowInfo("No KV buckets selected (use Space to select)")
+		return
+	}
+	label := fmt.Sprintf("%d KV buckets", len(keys))
+	ConfirmDelete(kl.app, "bulk", label, func() {
+		go func() {
+			for _, bucket := range keys {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if err := kl.app.Provider().DeleteKeyValue(ctx, bucket); err != nil {
+					kl.app.ShowError(fmt.Sprintf("Delete %s: %s", bucket, err))
+				}
+				cancel()
+			}
+			kl.app.ShowSuccess(fmt.Sprintf("Deleted %d KV buckets", len(keys)))
+			kl.table.ClearSelection()
+			kl.binding.RefreshAsync()
+		}()
 	})
 }
 
