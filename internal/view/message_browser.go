@@ -36,6 +36,9 @@ type MessageBrowser struct {
 	lastSeq   uint64
 
 	stopped int32
+
+	// JSON path filter for preview pane
+	jsonFilter string
 }
 
 func NewMessageBrowser(app *App, streamName string) *MessageBrowser {
@@ -103,6 +106,7 @@ func (mb *MessageBrowser) Hints() []components.KeyHint {
 		{Key: "w", Description: "Publish"},
 		{Key: "R", Description: "Republish"},
 		{Key: "y", Description: "Yank"},
+		{Key: "f", Description: "JSON filter"},
 		{Key: "x", Description: "Export page"},
 		{Key: "p", Description: "Preview"},
 		{Key: "r", Description: "Refresh"},
@@ -112,7 +116,16 @@ func (mb *MessageBrowser) Hints() []components.KeyHint {
 
 func (mb *MessageBrowser) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
 	return mb.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
+		if event.Key() == tcell.KeyEscape && mb.jsonFilter != "" {
+			mb.jsonFilter = ""
+			mb.SetDetailTitle("Message Detail")
+			row, _ := mb.table.GetSelection()
+			mb.renderPreview(row)
+			return
+		}
 		switch {
+		case event.Rune() == 'f':
+			mb.showJSONFilterInput()
 		case event.Rune() == 'G':
 			go mb.loadInitial()
 		case event.Rune() == '0':
@@ -367,6 +380,24 @@ func (mb *MessageBrowser) renderPreview(row int) {
 		}
 	}
 
+	// Apply JSON path filter if active
+	if mb.jsonFilter != "" && json.Valid(msg.Data) {
+		fmt.Fprintf(&b, "\n[%s]Filter:[-]    [yellow]%s[-]\n", dim, mb.jsonFilter)
+		result, err := evaluateJSONPath(msg.Data, mb.jsonFilter)
+		if err != nil {
+			fmt.Fprintf(&b, "\n[red]Filter error: %s[-]\n", err.Error())
+			fmt.Fprintf(&b, "\n[%s]Payload:[-]\n", dim)
+		} else {
+			fmt.Fprintf(&b, "\n[%s]Result:[-]\n", dim)
+			result = strings.ReplaceAll(result, "[", "[[")
+			b.WriteString(result)
+
+			mb.preview.SetText(b.String())
+			mb.preview.ScrollToBeginning()
+			return
+		}
+	}
+
 	fmt.Fprintf(&b, "\n[%s]Payload:[-]\n", dim)
 	data := string(msg.Data)
 	if json.Valid(msg.Data) {
@@ -380,6 +411,33 @@ func (mb *MessageBrowser) renderPreview(row int) {
 
 	mb.preview.SetText(b.String())
 	mb.preview.ScrollToBeginning()
+}
+
+func (mb *MessageBrowser) showJSONFilterInput() {
+	mb.app.statusBar.SetCommandPrompt("jq: ")
+	mb.app.statusBar.SetCommandPlaceholder(".field.nested")
+	mb.app.statusBar.EnterCommandMode()
+	if mb.jsonFilter != "" {
+		mb.app.statusBar.GetCommandInput().SetText(mb.jsonFilter)
+	}
+	mb.app.app.SetFocus(mb.app.statusBar.GetCommandInput())
+
+	mb.app.statusBar.SetOnCommandSubmit(func(text string) {
+		mb.app.statusBar.ExitCommandMode()
+		mb.jsonFilter = text
+		if text != "" {
+			mb.SetDetailTitle(fmt.Sprintf("Detail (jq: %s)", text))
+		} else {
+			mb.SetDetailTitle("Message Detail")
+		}
+		row, _ := mb.table.GetSelection()
+		mb.renderPreview(row)
+		mb.app.app.SetFocus(mb.MasterDetailView)
+	})
+	mb.app.statusBar.SetOnCommandCancel(func() {
+		mb.app.statusBar.ExitCommandMode()
+		mb.app.app.SetFocus(mb.MasterDetailView)
+	})
 }
 
 func (mb *MessageBrowser) showRepublishModal(msg *nats.RawMessage) {

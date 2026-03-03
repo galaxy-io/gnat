@@ -77,6 +77,9 @@ type MessageMonitor struct {
 
 	// Initial subject (for auto-subscribe on Start)
 	initSubject string
+
+	// JSON path filter for preview pane
+	jsonFilter string
 }
 
 // NewMessageMonitor creates the message monitor view.
@@ -273,6 +276,7 @@ func (mm *MessageMonitor) Hints() []components.KeyHint {
 	hints := []components.KeyHint{
 		{Key: "Enter", Description: "View"},
 		{Key: "/", Description: "Filter"},
+		{Key: "f", Description: "JSON filter"},
 		{Key: "p", Description: "Toggle preview"},
 	}
 
@@ -321,8 +325,15 @@ func (mm *MessageMonitor) InputHandler() func(event *tcell.EventKey, setFocus fu
 			return
 		}
 
-		// Escape — clear filter first, then let app handle back-nav
+		// Escape — clear JSON filter first, then search filter, then back-nav
 		if event.Key() == tcell.KeyEscape {
+			if mm.jsonFilter != "" {
+				mm.jsonFilter = ""
+				mm.SetDetailTitle("Message Detail")
+				row, _ := mm.table.GetSelection()
+				mm.renderPreview(row - 1)
+				return
+			}
 			if mm.GetSearchText() != "" {
 				mm.ClearSearch()
 				go mm.setFilter("")
@@ -413,6 +424,9 @@ func (mm *MessageMonitor) InputHandler() func(event *tcell.EventKey, setFocus fu
 			if msg, ok := mm.getSelectedMessage(); ok && msg.Stream != "" {
 				mm.app.NavigateToMessageBrowser(msg.Stream)
 			}
+			return
+		case 'f':
+			mm.showJSONFilterInput()
 			return
 		case 'd':
 			go mm.cycleDeliverPolicy()
@@ -763,6 +777,25 @@ func (mm *MessageMonitor) renderPreview(displayIdx int) {
 		fmt.Fprintf(&b, "\n[%s]Headers:[-]\n", dim)
 		for k, v := range msg.Headers {
 			fmt.Fprintf(&b, "  [%s]%s:[-] %s\n", dim, k, strings.Join(v, ", "))
+		}
+	}
+
+	// Apply JSON path filter if active
+	if mm.jsonFilter != "" && json.Valid(msg.Data) {
+		fmt.Fprintf(&b, "\n[%s]Filter:[-]    [yellow]%s[-]\n", dim, mm.jsonFilter)
+		result, err := evaluateJSONPath(msg.Data, mm.jsonFilter)
+		if err != nil {
+			fmt.Fprintf(&b, "\n[red]Filter error: %s[-]\n", err.Error())
+			fmt.Fprintf(&b, "\n[%s]Payload:[-]\n", dim)
+		} else {
+			fmt.Fprintf(&b, "\n[%s]Result:[-]\n", dim)
+			result = strings.ReplaceAll(result, "[", "[[")
+			b.WriteString(result)
+
+			mm.preview.SetText(b.String())
+			mm.preview.ScrollToBeginning()
+			mm.SetDetailContent(mm.preview)
+			return
 		}
 	}
 
@@ -1124,6 +1157,33 @@ func (mm *MessageMonitor) showRequestResponse(resp *nats.RequestResponse) {
 	})
 
 	mm.app.app.Pages().Push(modal)
+}
+
+func (mm *MessageMonitor) showJSONFilterInput() {
+	mm.app.statusBar.SetCommandPrompt("jq: ")
+	mm.app.statusBar.SetCommandPlaceholder(".field.nested")
+	mm.app.statusBar.EnterCommandMode()
+	if mm.jsonFilter != "" {
+		mm.app.statusBar.GetCommandInput().SetText(mm.jsonFilter)
+	}
+	mm.app.app.SetFocus(mm.app.statusBar.GetCommandInput())
+
+	mm.app.statusBar.SetOnCommandSubmit(func(text string) {
+		mm.app.statusBar.ExitCommandMode()
+		mm.jsonFilter = text
+		if text != "" {
+			mm.SetDetailTitle(fmt.Sprintf("Detail (jq: %s)", text))
+		} else {
+			mm.SetDetailTitle("Message Detail")
+		}
+		row, _ := mm.table.GetSelection()
+		mm.renderPreview(row - 1)
+		mm.app.app.SetFocus(mm.MasterDetailView)
+	})
+	mm.app.statusBar.SetOnCommandCancel(func() {
+		mm.app.statusBar.ExitCommandMode()
+		mm.app.app.SetFocus(mm.MasterDetailView)
+	})
 }
 
 func filterMessages(msgs []nats.LiveMessage, filter string) []nats.LiveMessage {
