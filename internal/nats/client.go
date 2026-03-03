@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	natsclient "github.com/nats-io/nats.go"
@@ -191,15 +192,40 @@ func (c *Client) StreamNameBySubject(ctx context.Context, subject string) (strin
 // Stream operations
 
 func (c *Client) StreamSubjects(ctx context.Context, streamName string) (map[string]uint64, error) {
+	// Try SDK first
 	stream, err := c.js.Stream(ctx, streamName)
 	if err != nil {
 		return nil, err
 	}
 	info, err := stream.Info(ctx, jetstream.WithSubjectFilter(">"))
+	if err == nil && len(info.State.Subjects) > 0 {
+		return info.State.Subjects, nil
+	}
+	// Fallback to raw API for older servers that reject the SDK's request format
+	return c.streamSubjectsRaw(streamName)
+}
+
+func (c *Client) streamSubjectsRaw(streamName string) (map[string]uint64, error) {
+	req := []byte(`{"subjects_filter":">"}`)
+	msg, err := c.nc.Request(fmt.Sprintf("$JS.API.STREAM.INFO.%s", streamName), req, 10*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	return info.State.Subjects, nil
+	var resp struct {
+		State struct {
+			Subjects map[string]uint64 `json:"subjects"`
+		} `json:"state"`
+		Error *struct {
+			Description string `json:"description"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, fmt.Errorf("stream %s subjects: %s", streamName, resp.Error.Description)
+	}
+	return resp.State.Subjects, nil
 }
 
 func (c *Client) PurgeStream(ctx context.Context, name string) error {
@@ -538,6 +564,11 @@ func (c *Client) WatchKeyValue(ctx context.Context, bucket string, handler func(
 	}
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Prevent silent goroutine death from handler panics
+			}
+		}()
 		for entry := range watcher.Updates() {
 			if entry == nil {
 				continue
@@ -725,10 +756,12 @@ type jsSubscription struct {
 
 func (s *jsSubscription) Unsubscribe() error {
 	s.ctx.Stop()
-	// Delete the ephemeral consumer
-	info, err := s.consumer.Info(context.Background())
+	// Delete the ephemeral consumer with a bounded timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	info, err := s.consumer.Info(ctx)
 	if err == nil && info != nil {
-		_ = s.stream.DeleteConsumer(context.Background(), info.Name)
+		_ = s.stream.DeleteConsumer(ctx, info.Name)
 	}
 	return nil
 }
