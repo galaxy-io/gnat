@@ -16,6 +16,7 @@ import (
 
 // Client implements Provider using the nats.go SDK.
 type Client struct {
+	mu     sync.RWMutex
 	nc     *natsclient.Conn
 	js     jetstream.JetStream
 	advSub *natsclient.Subscription
@@ -76,8 +77,11 @@ func Connect(ctx context.Context, cfg config.ConnectionConfig) (*Client, error) 
 }
 
 func (c *Client) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.advSub != nil {
 		_ = c.advSub.Unsubscribe()
+		c.advSub = nil
 	}
 	c.nc.Close()
 }
@@ -417,7 +421,9 @@ func (c *Client) SubscribeAdvisories(ctx context.Context, handler func(Advisory)
 	if err != nil {
 		return err
 	}
+	c.mu.Lock()
 	c.advSub = sub
+	c.mu.Unlock()
 	return nil
 }
 
@@ -454,6 +460,9 @@ func parseAdvisory(msg *natsclient.Msg) Advisory {
 
 // Reconnect closes the existing connection and connects with new config.
 func (c *Client) Reconnect(ctx context.Context, cfg config.ConnectionConfig) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	// Close existing connection
 	if c.advSub != nil {
 		_ = c.advSub.Unsubscribe()
