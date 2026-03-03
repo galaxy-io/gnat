@@ -264,6 +264,31 @@ func (a *App) NavigateToMessageMonitorWithSubject(subject string) {
 	a.app.Pages().Push(view)
 }
 
+func (a *App) NavigateToConsumerLag() {
+	view := NewConsumerLag(a)
+	a.app.Pages().Push(view)
+}
+
+func (a *App) NavigateToRequestReply() {
+	view := NewRequestReply(a, "")
+	a.app.Pages().Push(view)
+}
+
+func (a *App) NavigateToRequestReplyWithSubject(subject string) {
+	view := NewRequestReply(a, subject)
+	a.app.Pages().Push(view)
+}
+
+func (a *App) NavigateToSubjectExplorer() {
+	view := NewSubjectExplorer(a)
+	a.app.Pages().Push(view)
+}
+
+func (a *App) NavigateToPlayground() {
+	view := NewPlayground(a)
+	a.app.Pages().Push(view)
+}
+
 // Toast helpers
 
 // Toast returns the toast manager for custom toast operations.
@@ -303,6 +328,7 @@ func (a *App) showCommandBar() {
 		builtins := []string{
 			"streams", "s", "kv", "k", "objects", "obj", "o",
 			"dashboard", "dash", "d", "monitor", "mon", "m",
+			"lag", "cl", "request", "req", "subjects", "subj", "playground", "play",
 			"stream", "consumer", "watch", "purge", "pub", "get",
 			"import", "bookmarks", "bm",
 			"debug", "info",
@@ -372,6 +398,18 @@ func (a *App) handleCommand(text string) {
 		a.NavigateToDashboard()
 	case "monitor", "mon", "m", "sub":
 		a.NavigateToMessageMonitor()
+	case "lag", "cl":
+		a.NavigateToConsumerLag()
+	case "request", "req":
+		if len(args) > 0 {
+			a.NavigateToRequestReplyWithSubject(args[0])
+		} else {
+			a.NavigateToRequestReply()
+		}
+	case "subjects", "subj":
+		a.NavigateToSubjectExplorer()
+	case "playground", "play":
+		a.NavigateToPlayground()
 	case "profile", "profiles", "p":
 		a.handleProfileCommand(strings.Join(args, " "))
 	case "stream":
@@ -1034,12 +1072,20 @@ func (a *App) showHelp() {
 			{Key: "R", Description: "Republish message"},
 			{Key: "y", Description: "Yank payload"},
 		}).
+		AddSection("Message Views", []help.ActionInfo{
+			{Key: "f", Description: "JSON path filter (jq-like)"},
+			{Key: "Esc", Description: "Clear JSON filter"},
+		}).
 		AddSection("Commands (: mode)", []help.ActionInfo{
 			{Key: "streams", Description: "Go to Streams (alias: s)"},
 			{Key: "kv", Description: "Go to KV Stores (alias: k)"},
 			{Key: "objects", Description: "Go to Object Stores (alias: o)"},
 			{Key: "dashboard", Description: "Go to Dashboard (alias: d)"},
 			{Key: "monitor", Description: "Go to Message Monitor (alias: m)"},
+			{Key: "lag", Description: "Consumer Lag Dashboard (alias: cl)"},
+			{Key: "request", Description: "Request/Reply Tester (alias: req)"},
+			{Key: "subjects", Description: "Subject Explorer (alias: subj)"},
+			{Key: "playground", Description: "Pub/Sub Playground (alias: play)"},
 			{Key: "stream <name>", Description: "Go to stream detail"},
 			{Key: "consumer <s> <c>", Description: "Go to consumer detail"},
 			{Key: "watch <bucket>", Description: "Watch KV changes"},
