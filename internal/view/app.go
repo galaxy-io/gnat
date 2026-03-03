@@ -112,23 +112,40 @@ func (a *App) buildApp() {
 	}
 }
 
+func (a *App) isTextInputFocused() bool {
+	focused := a.app.GetApplication().GetFocus()
+	if focused == nil {
+		return false
+	}
+	switch focused.(type) {
+	case *tview.InputField, *tview.TextArea:
+		return true
+	}
+	return false
+}
+
 func (a *App) setup() {
 	a.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		// Skip global handling when command bar is active
+		// Pass all events through when command bar is active
 		if a.statusBar.IsCommandMode() {
+			return event
+		}
+
+		// Text inputs get all rune keys but not Esc/Backspace/Ctrl combos
+		if a.isTextInputFocused() && event.Key() == tcell.KeyRune {
 			return event
 		}
 
 		isModal := a.app.Pages().CurrentIsModal()
 
-		switch {
-		case event.Rune() == 'q' && !isModal:
-			if !a.app.Pages().CanPop() {
-				a.app.Stop()
-				return nil
-			}
+		// Ctrl-key combos work even in modals
+		if event.Key() == tcell.KeyCtrlP && !isModal {
+			a.showGlobalFinder()
+			return nil
+		}
 
-		case event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyBackspace2:
+		// Esc / Backspace for modal dismiss or back-nav
+		if event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyBackspace2 {
 			if isModal {
 				a.app.Pages().DismissModal()
 				return nil
@@ -137,32 +154,36 @@ func (a *App) setup() {
 				a.app.Pages().Pop()
 				return nil
 			}
+			return event
+		}
 
-		case event.Rune() == '?' && !isModal:
+		// All remaining global shortcuts are rune-based and suppressed in modals
+		if isModal {
+			return event
+		}
+
+		switch event.Rune() {
+		case 'q':
+			if !a.app.Pages().CanPop() {
+				a.app.Stop()
+				return nil
+			}
+		case '?':
 			a.showHelp()
 			return nil
-
-		case event.Rune() == 'T' && !isModal:
+		case 'T':
 			a.showThemeSelector()
 			return nil
-
-		case event.Rune() == 'P' && !isModal:
+		case 'P':
 			a.showProfileSelector()
 			return nil
-
-		case event.Rune() == '!' && !isModal:
+		case '!':
 			a.NavigateToDebug()
 			return nil
-
-		case event.Rune() == ':' && !isModal:
+		case ':':
 			a.showCommandBar()
 			return nil
-
-		case event.Key() == tcell.KeyCtrlP && !isModal:
-			a.showGlobalFinder()
-			return nil
-
-		case event.Rune() == 'B' && !isModal:
+		case 'B':
 			a.addCurrentBookmark()
 			return nil
 		}
