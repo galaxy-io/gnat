@@ -20,6 +20,7 @@ var (
 	liveRate  = flag.Duration("rate", 500*time.Millisecond, "Message publish rate in live mode")
 	showStats = flag.Bool("stats", false, "Show stream statistics after seeding")
 	extraMsgs = flag.Int("extra", 0, "Publish additional messages to streams for history testing")
+	responder = flag.Bool("responder", false, "Run request/reply echo responders for testing")
 )
 
 func main() {
@@ -57,11 +58,24 @@ func main() {
 		printStreamStats(ctx, js)
 	}
 
+	// Start request/reply responders
+	if *responder || *liveMode {
+		startResponders(nc)
+	}
+
 	if *liveMode {
 		fmt.Printf("\nStarting live publisher (rate: %v)...\n", *liveRate)
 		fmt.Println("Publishing to: orders.*, events.*, logs.*, metrics.*, notify.*")
 		fmt.Println("Press Ctrl+C to stop\n")
 		runLivePublisher(nc, js, *liveRate)
+	}
+
+	if *responder && !*liveMode {
+		fmt.Println("\nResponders running. Press Ctrl+C to stop.")
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		fmt.Println("\nStopped.")
 	}
 }
 
@@ -279,14 +293,24 @@ func seedMessages(ctx context.Context, js jetstream.JetStream, nc *nats.Conn) {
 
 	var messages []msg
 
-	// Orders
+	// Orders — nested JSON for jq filter testing (.customer.name, .items[0].sku, .metadata.source)
 	for i := 0; i < 200; i++ {
 		status := statuses[rand.Intn(len(statuses))]
 		region := regions[rand.Intn(len(regions))]
 		amount := rand.Float64()*500 + 5
+		itemCount := rand.Intn(3) + 1
+		items := ""
+		for j := 0; j < itemCount; j++ {
+			if j > 0 {
+				items += ","
+			}
+			items += fmt.Sprintf(`{"sku":"ITEM-%04d","name":"Product %d","qty":%d,"price":%.2f}`,
+				rand.Intn(9999), j+1, rand.Intn(5)+1, rand.Float64()*100+1)
+		}
 		messages = append(messages, msg{
 			subject: fmt.Sprintf("orders.%s", status),
-			data:    fmt.Sprintf(`{"order_id":"ORD-%06d","status":"%s","region":"%s","amount":%.2f,"items":%d,"customer":"cust-%04d"}`, i, status, region, amount, rand.Intn(10)+1, rand.Intn(5000)),
+			data: fmt.Sprintf(`{"order_id":"ORD-%06d","status":"%s","region":"%s","amount":%.2f,"items":[%s],"customer":{"id":"cust-%04d","name":"Customer %d","email":"c%d@example.com"},"metadata":{"source":"web","version":"2.1.0","trace_id":"%08x"}}`,
+				i, status, region, amount, items, rand.Intn(5000), i, i, rand.Uint32()),
 		})
 	}
 
@@ -356,12 +380,14 @@ func simulateConsumption(ctx context.Context, js jetstream.JetStream) {
 		count    int
 		ackRate  float64 // fraction of messages to ack
 	}{
-		{"ORDERS", "order-processor", 120, 0.9},
-		{"ORDERS", "order-analytics", 80, 0.95},
-		{"EVENTS", "event-handler", 200, 0.85},
-		{"EVENTS", "event-archiver", 150, 1.0},
-		{"LOGS", "log-indexer", 300, 0.7},
-		{"METRICS", "metrics-aggregator", 250, 0.8},
+		{"ORDERS", "order-processor", 120, 0.9},     // moderate lag
+		{"ORDERS", "order-analytics", 30, 0.5},      // high lag — barely consuming
+		{"ORDERS", "order-notifications", 0, 0},      // no consumption — max lag
+		{"EVENTS", "event-handler", 200, 0.85},       // moderate lag
+		{"EVENTS", "event-archiver", 50, 0.3},        // very high lag — slow archiver
+		{"LOGS", "log-indexer", 300, 0.7},             // moderate lag
+		{"LOGS", "log-alerts", 0, 0},                  // zero — watches new only
+		{"METRICS", "metrics-aggregator", 100, 0.4},  // high lag — overwhelmed
 	}
 
 	for _, c := range consume {
@@ -602,12 +628,31 @@ func printStreamStats(ctx context.Context, js jetstream.JetStream) {
 		fmt.Printf("%-15s msgs=%-6d bytes=%-10s subjects=%d\n",
 			name, info.State.Msgs, formatBytes(info.State.Bytes), info.State.NumSubjects)
 	}
-	fmt.Println("\nUse these subjects in the monitor with JetStream mode:")
-	fmt.Println("  orders.>     - Order events (created, processing, completed, cancelled)")
-	fmt.Println("  events.>     - Application events (user.*, payment.*)")
-	fmt.Println("  logs.>       - Log messages (info, warn, error, debug)")
-	fmt.Println("  metrics.>    - System metrics")
-	fmt.Println("  notify.>     - Notifications (email, sms, push, slack)")
+	fmt.Println("\n=== Testing New Features ===")
+	fmt.Println("JSON Filter (f key in monitor/browser):")
+	fmt.Println("  .status              - Extract status from any order message")
+	fmt.Println("  .customer.name       - Nested customer name")
+	fmt.Println("  .items[0].sku        - First item SKU")
+	fmt.Println("  .metadata.source     - Metadata source field")
+	fmt.Println("  .tags                - Tags array from user responses")
+	fmt.Println("")
+	fmt.Println("Consumer Lag (:lag):")
+	fmt.Println("  order-analytics      - High lag (low consumption)")
+	fmt.Println("  event-archiver       - Very high lag (slow archiver)")
+	fmt.Println("  metrics-aggregator   - High lag (overwhelmed)")
+	fmt.Println("")
+	fmt.Println("Request/Reply (:req):")
+	fmt.Println("  echo                 - Echo service (returns payload)")
+	fmt.Println("  orders.get           - Order lookup (send order ID)")
+	fmt.Println("  users.get            - User lookup (deeply nested response)")
+	fmt.Println("  health.check         - Health check service")
+	fmt.Println("  slow.echo            - Slow echo (500-3000ms, test timeouts)")
+	fmt.Println("")
+	fmt.Println("Subject Explorer (:subjects):")
+	fmt.Println("  Hierarchical: orders.*, events.user.*, logs.level.service, metrics.host.metric")
+	fmt.Println("")
+	fmt.Println("Playground (:play):")
+	fmt.Println("  Publish to any subject and auto-subscribe")
 }
 
 func formatBytes(b uint64) string {
@@ -668,6 +713,63 @@ func seedExtraMessages(ctx context.Context, js jetstream.JetStream, count int) {
 		published++
 	}
 	fmt.Printf("Published %d extra messages\n", published)
+}
+
+// startResponders sets up request/reply echo services for testing the Request/Reply Tester view.
+func startResponders(nc *nats.Conn) {
+	// Echo responder — returns the payload back with metadata
+	nc.Subscribe("echo", func(msg *nats.Msg) {
+		resp := fmt.Sprintf(`{"echo":true,"received_bytes":%d,"payload":%s,"server_time":"%s"}`,
+			len(msg.Data), string(msg.Data), time.Now().Format(time.RFC3339Nano))
+		msg.Respond([]byte(resp))
+	})
+	fmt.Println("responder: echo (subject: echo)")
+
+	// Order lookup responder — simulates a service that looks up order details
+	nc.Subscribe("orders.get", func(msg *nats.Msg) {
+		orderID := string(msg.Data)
+		if orderID == "" {
+			orderID = fmt.Sprintf("ORD-%06d", rand.Intn(999999))
+		}
+		resp := fmt.Sprintf(`{"order_id":"%s","status":"completed","region":"us-east","amount":%.2f,"items":[{"sku":"ITEM-%04d","name":"Widget","qty":%d,"price":%.2f},{"sku":"ITEM-%04d","name":"Gadget","qty":%d,"price":%.2f}],"customer":{"id":"cust-%04d","name":"Test User","email":"test@example.com"},"created_at":"%s"}`,
+			orderID, rand.Float64()*500+5,
+			rand.Intn(9999), rand.Intn(5)+1, rand.Float64()*50+1,
+			rand.Intn(9999), rand.Intn(3)+1, rand.Float64()*100+10,
+			rand.Intn(5000), time.Now().Add(-time.Duration(rand.Intn(86400))*time.Second).Format(time.RFC3339))
+		msg.Respond([]byte(resp))
+	})
+	fmt.Println("responder: orders.get (subject: orders.get)")
+
+	// Health check responder
+	nc.Subscribe("health.check", func(msg *nats.Msg) {
+		resp := fmt.Sprintf(`{"status":"healthy","uptime_seconds":%d,"version":"1.0.0","services":{"database":"ok","cache":"ok","queue":"ok"},"timestamp":"%s"}`,
+			rand.Intn(86400*30), time.Now().Format(time.RFC3339Nano))
+		msg.Respond([]byte(resp))
+	})
+	fmt.Println("responder: health.check (subject: health.check)")
+
+	// User lookup responder — deeply nested JSON for testing jq filter
+	nc.Subscribe("users.get", func(msg *nats.Msg) {
+		userID := string(msg.Data)
+		if userID == "" {
+			userID = fmt.Sprintf("usr-%05d", rand.Intn(10000))
+		}
+		resp := fmt.Sprintf(`{"user":{"id":"%s","profile":{"name":"User %s","email":"%s@example.com","avatar":"https://example.com/avatars/%s.png","preferences":{"theme":"dark","language":"en","notifications":{"email":true,"push":false,"sms":true}}},"account":{"plan":"pro","created":"%s","usage":{"storage_mb":%d,"api_calls":%d,"bandwidth_mb":%d}},"tags":["active","verified","premium"]}}`,
+			userID, userID, userID, userID,
+			time.Now().Add(-time.Duration(rand.Intn(365*24))*time.Hour).Format(time.RFC3339),
+			rand.Intn(5000), rand.Intn(100000), rand.Intn(10000))
+		msg.Respond([]byte(resp))
+	})
+	fmt.Println("responder: users.get (subject: users.get)")
+
+	// Slow responder — for testing timeout behavior
+	nc.Subscribe("slow.echo", func(msg *nats.Msg) {
+		delay := time.Duration(500+rand.Intn(2500)) * time.Millisecond
+		time.Sleep(delay)
+		resp := fmt.Sprintf(`{"echo":true,"delay_ms":%d,"payload":%q}`, delay.Milliseconds(), string(msg.Data))
+		msg.Respond([]byte(resp))
+	})
+	fmt.Println("responder: slow.echo (subject: slow.echo, 500-3000ms delay)")
 }
 
 // runLivePublisher continuously publishes messages with random throughput
