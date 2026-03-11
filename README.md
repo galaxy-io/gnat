@@ -11,7 +11,7 @@ A [NATS](https://nats.io) JetStream TUI that won't bug you
 </div>
 
 <p align="center">
-  <img src="./assets/gnat_cover.png" alt="Gnat" width="800">
+  <img src="./assets/gnat_demo.gif" alt="Gnat" width="800">
 </p>
 
 ## Features
