@@ -73,19 +73,19 @@ A [NATS](https://nats.io) JetStream TUI that won't bug you
 ### From Source
 
 ```bash
-go install github.com/atterpac/gnat/cmd/gnat@latest
+go install github.com/galaxy-io/gnat/cmd/gnat@latest
 ```
 
 ### Brew
 
 ```bash
-brew install atterpac/tap/gnat
+brew install galaxy-io/tap/gnat
 ```
 
 ### Build Locally
 
 ```bash
-git clone https://github.com/atterpac/gnat.git
+git clone https://github.com/galaxy-io/gnat.git
 cd gnat
 go build -o gnat ./cmd/gnat
 ```
@@ -206,7 +206,7 @@ You can contribute by:
 - Improving documentation
 - Fixing issues labeled good first issue
 
-To report a bug, make a feature request, and more, visit our [issues page](https://github.com/atterpac/gnat/issues)
+To report a bug, make a feature request, and more, visit our [issues page](https://github.com/galaxy-io/gnat/issues)
 
 ## Acknowledgments
 
