@@ -1,0 +1,137 @@
+version: '3'
+
+vars:
+  BINARY: gnat
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+  BUILD_DATE:
+    sh: date -u +"%Y-%m-%dT%H:%M:%SZ"
+  LDFLAGS: -s -w -X main.version={{.VERSION}} -X main.commit={{.COMMIT}} -X main.buildDate={{.BUILD_DATE}}
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build the gnat binary
+    cmds:
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BINARY}} ./cmd/gnat
+    sources:
+      - ./**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - "{{.BINARY}}"
+
+  dev:
+    desc: Build and run in development mode
+    cmds:
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BINARY}} ./cmd/gnat
+      - ./{{.BINARY}}
+    interactive: true
+
+  run:
+    desc: Build and run
+    cmds:
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BINARY}} ./cmd/gnat
+      - ./{{.BINARY}}
+    interactive: true
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -f {{.BINARY}}
+      - rm -rf dist/
+
+  tidy:
+    desc: Tidy and verify go modules
+    cmds:
+      - go mod tidy
+      - go mod verify
+
+  lint:
+    desc: Run linter
+    cmds:
+      - golangci-lint run ./...
+
+  test:
+    desc: Run tests
+    cmds:
+      - go test -v ./...
+
+  seed:
+    desc: Run the seeder to populate test data
+    cmds:
+      - go run ./cmd/seeder
+
+  seed-live:
+    desc: Run the seeder in live publishing mode
+    cmds:
+      - go run ./cmd/seeder -live
+    interactive: true
+
+  tag:
+    desc: Create a new version tag
+    summary: |
+      Creates a git tag for release.
+      Usage: task tag -- v1.0.0
+    cmds:
+      - |
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Usage: task tag -- v1.0.0"
+          echo ""
+          echo "Current tags:"
+          git tag --sort=-v:refname | head -10
+          exit 1
+        fi
+        git tag -a {{.CLI_ARGS}} -m "Release {{.CLI_ARGS}}"
+        echo "Created tag {{.CLI_ARGS}}"
+        echo "Push with: git push origin {{.CLI_ARGS}}"
+
+  tag-push:
+    desc: Create and push a new version tag
+    summary: |
+      Creates and pushes a git tag to trigger release.
+      Usage: task tag-push -- v1.0.0
+    cmds:
+      - |
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Usage: task tag-push -- v1.0.0"
+          exit 1
+        fi
+        git tag -a {{.CLI_ARGS}} -m "Release {{.CLI_ARGS}}"
+        git push origin {{.CLI_ARGS}}
+        echo "Tag {{.CLI_ARGS}} pushed - GitHub Actions will build release"
+
+  release:
+    desc: Run goreleaser locally (snapshot, no publish)
+    cmds:
+      - goreleaser release --snapshot --clean
+    preconditions:
+      - sh: command -v goreleaser
+        msg: "goreleaser not installed. Install with: brew install goreleaser"
+
+  release-dry:
+    desc: Dry run goreleaser to check config
+    cmds:
+      - goreleaser check
+      - goreleaser release --snapshot --clean --skip=publish
+    preconditions:
+      - sh: command -v goreleaser
+        msg: "goreleaser not installed. Install with: brew install goreleaser"
+
+  version:
+    desc: Show current version info
+    cmds:
+      - 'echo "Version: {{.VERSION}}"'
+      - 'echo "Commit:  {{.COMMIT}}"'
+      - 'echo "Built:   {{.BUILD_DATE}}"'
+
+  install:
+    desc: Install gnat to GOPATH/bin
+    cmds:
+      - go install -ldflags "{{.LDFLAGS}}" ./cmd/gnat
