@@ -31,6 +31,10 @@ type StreamList struct {
 	prevBytes map[string]uint64
 	prevTime  time.Time
 	rates     map[string][2]float64 // [msgs/s, bytes/s]
+
+	// Rolling rate history for sparklines
+	msgRateHistory  map[string][]float64
+	byteRateHistory map[string][]float64
 }
 
 // NewStreamList creates the stream list view.
@@ -94,6 +98,10 @@ func NewStreamList(app *App) *StreamList {
 			}
 			// Compute growth rates
 			now := time.Now()
+			if sl.msgRateHistory == nil {
+				sl.msgRateHistory = make(map[string][]float64)
+				sl.byteRateHistory = make(map[string][]float64)
+			}
 			if sl.prevMsgs != nil && !sl.prevTime.IsZero() {
 				elapsed := now.Sub(sl.prevTime).Seconds()
 				if elapsed > 0 {
@@ -104,6 +112,14 @@ func NewStreamList(app *App) *StreamList {
 							msgRate := float64(s.State.Msgs-prevM) / elapsed
 							byteRate := float64(s.State.Bytes-sl.prevBytes[name]) / elapsed
 							sl.rates[name] = [2]float64{msgRate, byteRate}
+							sl.msgRateHistory[name] = append(sl.msgRateHistory[name], msgRate)
+							sl.byteRateHistory[name] = append(sl.byteRateHistory[name], byteRate)
+							if len(sl.msgRateHistory[name]) > 60 {
+								sl.msgRateHistory[name] = sl.msgRateHistory[name][len(sl.msgRateHistory[name])-60:]
+							}
+							if len(sl.byteRateHistory[name]) > 60 {
+								sl.byteRateHistory[name] = sl.byteRateHistory[name][len(sl.byteRateHistory[name])-60:]
+							}
 						}
 					}
 				}
@@ -115,6 +131,10 @@ func NewStreamList(app *App) *StreamList {
 				sl.prevBytes[s.Config.Name] = s.State.Bytes
 			}
 			sl.prevTime = now
+			sl.app.QueueUpdateDraw(func() {
+				row, _ := sl.table.GetSelection()
+				sl.updatePreview(row)
+			})
 		})
 
 	sl.table.SetSelectionChangedFunc(func(row, col int) {
@@ -322,6 +342,13 @@ func (sl *StreamList) updatePreview(row int) {
 		if rate, ok := sl.rates[s.Config.Name]; ok && (rate[0] > 0.1 || rate[1] > 0.1) {
 			fmt.Fprintf(&b, "[%s]Msg Rate:[-]    [%s]%.1f msg/s[-]\n", dim, accent, rate[0])
 			fmt.Fprintf(&b, "[%s]Byte Rate:[-]   [%s]%s/s[-]\n", dim, accent, formatBytes(uint64(rate[1])))
+		}
+	}
+	if h := sl.msgRateHistory[s.Config.Name]; len(h) > 1 {
+		fmt.Fprintf(&b, "\n[%s]── Rate History ──[-]\n", dim)
+		fmt.Fprintf(&b, "[%s]Msgs/s:[-]  [%s]%s[-]\n", dim, accent, miniSparkline(h, 30))
+		if bh := sl.byteRateHistory[s.Config.Name]; len(bh) > 1 {
+			fmt.Fprintf(&b, "[%s]Bytes/s:[-] [%s]%s[-]\n", dim, accent, miniSparkline(bh, 30))
 		}
 	}
 	if s.State.NumDeleted > 0 {

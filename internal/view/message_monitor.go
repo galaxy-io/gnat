@@ -78,8 +78,9 @@ type MessageMonitor struct {
 	// Initial subject (for auto-subscribe on Start)
 	initSubject string
 
-	// JSON path filter for preview pane
+	// JSON path / pipeline filter for preview pane
 	jsonFilter string
+	pipeline   *Pipeline
 }
 
 // NewMessageMonitor creates the message monitor view.
@@ -277,6 +278,7 @@ func (mm *MessageMonitor) Hints() []components.KeyHint {
 		{Key: "Enter", Description: "View"},
 		{Key: "/", Description: "Filter"},
 		{Key: "f", Description: "JSON filter"},
+		{Key: "F", Description: "Pipeline"},
 		{Key: "p", Description: "Toggle preview"},
 	}
 
@@ -325,8 +327,15 @@ func (mm *MessageMonitor) InputHandler() func(event *tcell.EventKey, setFocus fu
 			return
 		}
 
-		// Escape — clear JSON filter first, then search filter, then back-nav
+		// Escape — clear pipeline first, then JSON filter, then search filter, then back-nav
 		if event.Key() == tcell.KeyEscape {
+			if mm.pipeline != nil {
+				mm.pipeline = nil
+				mm.SetDetailTitle("Message Detail")
+				row, _ := mm.table.GetSelection()
+				mm.renderPreview(row - 1)
+				return
+			}
 			if mm.jsonFilter != "" {
 				mm.jsonFilter = ""
 				mm.SetDetailTitle("Message Detail")
@@ -427,6 +436,9 @@ func (mm *MessageMonitor) InputHandler() func(event *tcell.EventKey, setFocus fu
 			return
 		case 'f':
 			mm.showJSONFilterInput()
+			return
+		case 'F':
+			mm.showPipelineInput()
 			return
 		case 'd':
 			go mm.cycleDeliverPolicy()
@@ -777,6 +789,25 @@ func (mm *MessageMonitor) renderPreview(displayIdx int) {
 		fmt.Fprintf(&b, "\n[%s]Headers:[-]\n", dim)
 		for k, v := range msg.Headers {
 			fmt.Fprintf(&b, "  [%s]%s:[-] %s\n", dim, k, strings.Join(v, ", "))
+		}
+	}
+
+	// Apply pipeline if active
+	if mm.pipeline != nil && json.Valid(msg.Data) {
+		fmt.Fprintf(&b, "\n[%s]Pipeline:[-]  [yellow]%s[-]\n", dim, mm.pipeline.String())
+		result, err := mm.pipeline.Execute(msg.Data)
+		if err != nil {
+			fmt.Fprintf(&b, "\n[red]Pipeline error: %s[-]\n", err.Error())
+			fmt.Fprintf(&b, "\n[%s]Payload:[-]\n", dim)
+		} else {
+			fmt.Fprintf(&b, "\n[%s]Result:[-]\n", dim)
+			result = strings.ReplaceAll(result, "[", "[[")
+			b.WriteString(result)
+
+			mm.preview.SetText(b.String())
+			mm.preview.ScrollToBeginning()
+			mm.SetDetailContent(mm.preview)
+			return
 		}
 	}
 
@@ -1175,6 +1206,40 @@ func (mm *MessageMonitor) showJSONFilterInput() {
 			mm.SetDetailTitle(fmt.Sprintf("Detail (jq: %s)", text))
 		} else {
 			mm.SetDetailTitle("Message Detail")
+		}
+		row, _ := mm.table.GetSelection()
+		mm.renderPreview(row - 1)
+		mm.app.app.SetFocus(mm.MasterDetailView)
+	})
+	mm.app.statusBar.SetOnCommandCancel(func() {
+		mm.app.statusBar.ExitCommandMode()
+		mm.app.app.SetFocus(mm.MasterDetailView)
+	})
+}
+
+func (mm *MessageMonitor) showPipelineInput() {
+	mm.app.statusBar.SetCommandPrompt("pipeline: ")
+	mm.app.statusBar.SetCommandPlaceholder(".data | select(.status == \"active\") | map(.name)")
+	mm.app.statusBar.EnterCommandMode()
+	if mm.pipeline != nil {
+		mm.app.statusBar.GetCommandInput().SetText(mm.pipeline.String())
+	}
+	mm.app.app.SetFocus(mm.app.statusBar.GetCommandInput())
+
+	mm.app.statusBar.SetOnCommandSubmit(func(text string) {
+		mm.app.statusBar.ExitCommandMode()
+		if text == "" {
+			mm.pipeline = nil
+			mm.SetDetailTitle("Message Detail")
+		} else {
+			p, err := ParsePipeline(text)
+			if err != nil {
+				mm.app.ShowError("Pipeline: " + err.Error())
+				mm.app.app.SetFocus(mm.MasterDetailView)
+				return
+			}
+			mm.pipeline = p
+			mm.SetDetailTitle(fmt.Sprintf("Detail (pipeline: %s)", text))
 		}
 		row, _ := mm.table.GetSelection()
 		mm.renderPreview(row - 1)

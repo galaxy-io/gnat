@@ -26,9 +26,16 @@ const splashLogo = `
 ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░ ░▒▓█▓▒░     
 ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░ ░▒▓█▓▒░     
  ░▒▓██████▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░ ░▒▓█▓▒░     
+ 
+
 `
 
-var version = "dev"
+// Set via ldflags at build time.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
 
 func main() {
 	var (
@@ -47,7 +54,7 @@ func main() {
 	flag.Parse()
 
 	if flagVersion {
-		fmt.Printf("gnat %s\n", version)
+		fmt.Printf("gnat %s (%s) built %s\n", version, commit, buildDate)
 		os.Exit(0)
 	}
 
@@ -113,12 +120,11 @@ func connectWithUI(cfg config.ConnectionConfig) (gnatnats.Provider, error) {
 	app := tview.NewApplication()
 
 	// Create splash using jig's Splash component
-	// Logo is ~56 chars wide and 7 lines tall (plus padding)
 	splash := components.NewSplash().
 		SetLogo(splashLogo).
-		SetLogoWidth(58).
-		SetLogoHeight(9).
-		SetStatusHeight(4).
+		SetLogoWidth(56).
+		SetLogoHeight(11).
+		SetStatusHeight(6).
 		SetGradient(theme.GradientDiagonal).
 		SetDismissKeys(nil) // Disable auto-dismiss keys, we handle q/Ctrl+C manually
 
@@ -128,7 +134,7 @@ func connectWithUI(cfg config.ConnectionConfig) (gnatnats.Provider, error) {
 	// Helper to update splash status with tagline + connection status
 	updateStatus := func(connectionStatus string) {
 		tagline := fmt.Sprintf("[%s]Made with %s by getgalaxy.io[-]", theme.TagFgDim(), theme.IconHeart)
-		splash.SetStatus(tagline + "\n" + connectionStatus)
+		splash.SetStatus(connectionStatus + "\n" + tagline)
 	}
 	updateStatus(fmt.Sprintf("[%s]Initializing...[-]", theme.TagFgDim()))
 
@@ -174,7 +180,6 @@ func connectWithUI(cfg config.ConnectionConfig) (gnatnats.Provider, error) {
 				app.QueueUpdateDraw(func() {
 					updateStatus("[green]Connected![-]")
 				})
-				time.Sleep(500 * time.Millisecond)
 				done <- result{provider: client}
 				app.Stop()
 				return

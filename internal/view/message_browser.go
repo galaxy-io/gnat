@@ -37,8 +37,9 @@ type MessageBrowser struct {
 
 	stopped int32
 
-	// JSON path filter for preview pane
+	// JSON path / pipeline filter for preview pane
 	jsonFilter string
+	pipeline   *Pipeline
 }
 
 func NewMessageBrowser(app *App, streamName string) *MessageBrowser {
@@ -107,6 +108,7 @@ func (mb *MessageBrowser) Hints() []components.KeyHint {
 		{Key: "R", Description: "Republish"},
 		{Key: "y", Description: "Yank"},
 		{Key: "f", Description: "JSON filter"},
+		{Key: "F", Description: "Pipeline"},
 		{Key: "x", Description: "Export page"},
 		{Key: "p", Description: "Preview"},
 		{Key: "r", Description: "Refresh"},
@@ -116,16 +118,27 @@ func (mb *MessageBrowser) Hints() []components.KeyHint {
 
 func (mb *MessageBrowser) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
 	return mb.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		if event.Key() == tcell.KeyEscape && mb.jsonFilter != "" {
-			mb.jsonFilter = ""
-			mb.SetDetailTitle("Message Detail")
-			row, _ := mb.table.GetSelection()
-			mb.renderPreview(row)
-			return
+		if event.Key() == tcell.KeyEscape {
+			if mb.pipeline != nil {
+				mb.pipeline = nil
+				mb.SetDetailTitle("Message Detail")
+				row, _ := mb.table.GetSelection()
+				mb.renderPreview(row)
+				return
+			}
+			if mb.jsonFilter != "" {
+				mb.jsonFilter = ""
+				mb.SetDetailTitle("Message Detail")
+				row, _ := mb.table.GetSelection()
+				mb.renderPreview(row)
+				return
+			}
 		}
 		switch {
 		case event.Rune() == 'f':
 			mb.showJSONFilterInput()
+		case event.Rune() == 'F':
+			mb.showPipelineInput()
 		case event.Rune() == 'G':
 			go mb.loadInitial()
 		case event.Rune() == '0':
@@ -380,6 +393,24 @@ func (mb *MessageBrowser) renderPreview(row int) {
 		}
 	}
 
+	// Apply pipeline if active
+	if mb.pipeline != nil && json.Valid(msg.Data) {
+		fmt.Fprintf(&b, "\n[%s]Pipeline:[-]  [yellow]%s[-]\n", dim, mb.pipeline.String())
+		result, err := mb.pipeline.Execute(msg.Data)
+		if err != nil {
+			fmt.Fprintf(&b, "\n[red]Pipeline error: %s[-]\n", err.Error())
+			fmt.Fprintf(&b, "\n[%s]Payload:[-]\n", dim)
+		} else {
+			fmt.Fprintf(&b, "\n[%s]Result:[-]\n", dim)
+			result = strings.ReplaceAll(result, "[", "[[")
+			b.WriteString(result)
+
+			mb.preview.SetText(b.String())
+			mb.preview.ScrollToBeginning()
+			return
+		}
+	}
+
 	// Apply JSON path filter if active
 	if mb.jsonFilter != "" && json.Valid(msg.Data) {
 		fmt.Fprintf(&b, "\n[%s]Filter:[-]    [yellow]%s[-]\n", dim, mb.jsonFilter)
@@ -429,6 +460,40 @@ func (mb *MessageBrowser) showJSONFilterInput() {
 			mb.SetDetailTitle(fmt.Sprintf("Detail (jq: %s)", text))
 		} else {
 			mb.SetDetailTitle("Message Detail")
+		}
+		row, _ := mb.table.GetSelection()
+		mb.renderPreview(row)
+		mb.app.app.SetFocus(mb.MasterDetailView)
+	})
+	mb.app.statusBar.SetOnCommandCancel(func() {
+		mb.app.statusBar.ExitCommandMode()
+		mb.app.app.SetFocus(mb.MasterDetailView)
+	})
+}
+
+func (mb *MessageBrowser) showPipelineInput() {
+	mb.app.statusBar.SetCommandPrompt("pipeline: ")
+	mb.app.statusBar.SetCommandPlaceholder(".data | select(.status == \"active\") | map(.name)")
+	mb.app.statusBar.EnterCommandMode()
+	if mb.pipeline != nil {
+		mb.app.statusBar.GetCommandInput().SetText(mb.pipeline.String())
+	}
+	mb.app.app.SetFocus(mb.app.statusBar.GetCommandInput())
+
+	mb.app.statusBar.SetOnCommandSubmit(func(text string) {
+		mb.app.statusBar.ExitCommandMode()
+		if text == "" {
+			mb.pipeline = nil
+			mb.SetDetailTitle("Message Detail")
+		} else {
+			p, err := ParsePipeline(text)
+			if err != nil {
+				mb.app.ShowError("Pipeline: " + err.Error())
+				mb.app.app.SetFocus(mb.MasterDetailView)
+				return
+			}
+			mb.pipeline = p
+			mb.SetDetailTitle(fmt.Sprintf("Detail (pipeline: %s)", text))
 		}
 		row, _ := mb.table.GetSelection()
 		mb.renderPreview(row)

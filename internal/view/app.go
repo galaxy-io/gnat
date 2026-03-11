@@ -1095,7 +1095,8 @@ func (a *App) showHelp() {
 		}).
 		AddSection("Message Views", []help.ActionInfo{
 			{Key: "f", Description: "JSON path filter (jq-like)"},
-			{Key: "Esc", Description: "Clear JSON filter"},
+			{Key: "F", Description: "Pipeline (.field | select | map | sort)"},
+			{Key: "Esc", Description: "Clear filter/pipeline"},
 		}).
 		AddSection("Commands (: mode)", []help.ActionInfo{
 			{Key: "streams", Description: "Go to Streams (alias: s)"},
