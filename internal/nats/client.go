@@ -192,40 +192,64 @@ func (c *Client) StreamNameBySubject(ctx context.Context, subject string) (strin
 // Stream operations
 
 func (c *Client) StreamSubjects(ctx context.Context, streamName string) (map[string]uint64, error) {
-	// Try SDK first
-	stream, err := c.js.Stream(ctx, streamName)
-	if err != nil {
-		return nil, err
-	}
-	info, err := stream.Info(ctx, jetstream.WithSubjectFilter(">"))
-	if err == nil && len(info.State.Subjects) > 0 {
-		return info.State.Subjects, nil
-	}
-	// Fallback to raw API for older servers that reject the SDK's request format
-	return c.streamSubjectsRaw(streamName)
+	return c.streamSubjectsPaginated(ctx, streamName)
 }
 
-func (c *Client) streamSubjectsRaw(streamName string) (map[string]uint64, error) {
-	req := []byte(`{"subjects_filter":">"}`)
-	msg, err := c.nc.Request(fmt.Sprintf("$JS.API.STREAM.INFO.%s", streamName), req, 10*time.Second)
-	if err != nil {
-		return nil, err
+// streamSubjectsPaginated fetches the subject→count map using the raw
+// JetStream API with offset-based pagination so that large subject sets
+// are retrieved in bounded pages rather than a single unbounded response.
+func (c *Client) streamSubjectsPaginated(ctx context.Context, streamName string) (map[string]uint64, error) {
+	apiSubject := fmt.Sprintf("$JS.API.STREAM.INFO.%s", streamName)
+	all := make(map[string]uint64)
+	offset := 0
+
+	for {
+		if ctx.Err() != nil {
+			return all, ctx.Err()
+		}
+
+		req := fmt.Sprintf(`{"subjects_filter":">","offset":%d}`, offset)
+		msg, err := c.nc.RequestWithContext(ctx, apiSubject, []byte(req))
+		if err != nil {
+			if len(all) > 0 {
+				return all, nil // return what we have
+			}
+			return nil, err
+		}
+
+		var resp struct {
+			Total  int `json:"total"`
+			Offset int `json:"offset"`
+			Limit  int `json:"limit"`
+			State  struct {
+				Subjects map[string]uint64 `json:"subjects"`
+			} `json:"state"`
+			Error *struct {
+				Description string `json:"description"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(msg.Data, &resp); err != nil {
+			if len(all) > 0 {
+				return all, nil
+			}
+			return nil, err
+		}
+		if resp.Error != nil {
+			return nil, fmt.Errorf("stream %s subjects: %s", streamName, resp.Error.Description)
+		}
+
+		for subj, count := range resp.State.Subjects {
+			all[subj] = count
+		}
+
+		// No subjects in response or we've collected them all — done.
+		if len(resp.State.Subjects) == 0 || len(all) >= resp.Total {
+			break
+		}
+		offset = len(all)
 	}
-	var resp struct {
-		State struct {
-			Subjects map[string]uint64 `json:"subjects"`
-		} `json:"state"`
-		Error *struct {
-			Description string `json:"description"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		return nil, err
-	}
-	if resp.Error != nil {
-		return nil, fmt.Errorf("stream %s subjects: %s", streamName, resp.Error.Description)
-	}
-	return resp.State.Subjects, nil
+
+	return all, nil
 }
 
 func (c *Client) PurgeStream(ctx context.Context, name string) error {
