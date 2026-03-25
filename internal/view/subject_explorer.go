@@ -1,13 +1,16 @@
 package view
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/atterpac/gnat/internal/nats"
 	"github.com/atterpac/jig/binding"
 	"github.com/atterpac/jig/components"
 	"github.com/atterpac/jig/theme"
@@ -38,6 +41,10 @@ type SubjectExplorer struct {
 	state       *binding.Value[subjectExplorerState]
 	stopRefresh chan struct{}
 	stopped     int32
+
+	// Recent messages preview
+	previewCancel  context.CancelFunc
+	previewData    *subjectNodeData
 }
 
 func NewSubjectExplorer(app *App) *SubjectExplorer {
@@ -398,6 +405,53 @@ func (se *SubjectExplorer) renderPreview(node *components.TreeNode) {
 		return
 	}
 
+	// Cancel any in-flight preview fetch
+	if se.previewCancel != nil {
+		se.previewCancel()
+	}
+	se.previewData = data
+
+	// Render metadata immediately
+	se.renderPreviewText(data, nil)
+
+	// Only fetch messages for leaf subjects with at least one stream
+	if !node.IsLeaf() || len(data.Streams) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	se.previewCancel = cancel
+
+	subject := data.FullPath
+	streams := make([]string, len(data.Streams))
+	copy(streams, data.Streams)
+
+	go func() {
+		defer cancel()
+		provider := se.app.Provider()
+		if provider == nil {
+			return
+		}
+		var msgs []*nats.RawMessage
+		for _, stream := range streams {
+			if ctx.Err() != nil {
+				return
+			}
+			fetched, err := provider.GetRecentMessagesForSubject(ctx, stream, subject, 5)
+			if err != nil {
+				continue
+			}
+			msgs = append(msgs, fetched...)
+		}
+		se.app.QueueUpdateDraw(func() {
+			if se.previewData == data {
+				se.renderPreviewText(data, msgs)
+			}
+		})
+	}()
+}
+
+func (se *SubjectExplorer) renderPreviewText(data *subjectNodeData, msgs []*nats.RawMessage) {
 	dim := theme.TagFgDim()
 	accent := theme.TagAccent()
 
@@ -409,6 +463,26 @@ func (se *SubjectExplorer) renderPreview(node *components.TreeNode) {
 		fmt.Fprintf(&b, "\n[%s]Streams:[-]\n", dim)
 		for _, s := range data.Streams {
 			fmt.Fprintf(&b, "  [%s]%s[-]\n", accent, s)
+		}
+	}
+
+	if len(msgs) > 0 {
+		fmt.Fprintf(&b, "\n[%s]Recent Messages:[-]\n", dim)
+		for _, msg := range msgs {
+			ts := msg.Time.Format("15:04:05")
+			fmt.Fprintf(&b, "\n  [%s]%s[-] [%s]seq=%d  %s  %s[-]\n", accent, msg.Subject, dim, msg.Sequence, ts, formatBytes(uint64(len(msg.Data))))
+			payload := string(msg.Data)
+			if json.Valid(msg.Data) {
+				var pretty bytes.Buffer
+				if err := json.Indent(&pretty, msg.Data, "    ", "  "); err == nil {
+					payload = pretty.String()
+				}
+			}
+			payload = strings.ReplaceAll(payload, "[", "[[")
+			if len(payload) > 500 {
+				payload = payload[:500] + "..."
+			}
+			fmt.Fprintf(&b, "    %s\n", payload)
 		}
 	}
 
