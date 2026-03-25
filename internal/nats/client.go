@@ -511,6 +511,13 @@ func (c *Client) DeleteObjectStore(ctx context.Context, bucket string) error {
 // Advisories
 
 func (c *Client) SubscribeAdvisories(ctx context.Context, handler func(Advisory)) error {
+	c.mu.Lock()
+	if c.advSub != nil {
+		_ = c.advSub.Unsubscribe()
+		c.advSub = nil
+	}
+	c.mu.Unlock()
+
 	sub, err := c.nc.Subscribe("$JS.EVENT.ADVISORY.>", func(msg *natsclient.Msg) {
 		adv := parseAdvisory(msg)
 		handler(adv)
@@ -518,10 +525,22 @@ func (c *Client) SubscribeAdvisories(ctx context.Context, handler func(Advisory)
 	if err != nil {
 		return err
 	}
+	// Cap the pending buffer so a high-volume advisory stream cannot
+	// grow unboundedly 
+	_ = sub.SetPendingLimits(1024, 8*1024*1024) // 1024 msgs / 8 MB
 	c.mu.Lock()
 	c.advSub = sub
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *Client) UnsubscribeAdvisories() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.advSub != nil {
+		_ = c.advSub.Unsubscribe()
+		c.advSub = nil
+	}
 }
 
 func parseAdvisory(msg *natsclient.Msg) Advisory {
@@ -634,41 +653,54 @@ func (c *Client) WatchKeyValue(ctx context.Context, bucket string, handler func(
 		return nil, err
 	}
 
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				// Prevent silent goroutine death from handler panics
 			}
 		}()
-		for entry := range watcher.Updates() {
-			if entry == nil {
-				continue
+		updates := watcher.Updates()
+		for {
+			select {
+			case <-watchCtx.Done():
+				return
+			case entry, ok := <-updates:
+				if !ok {
+					return
+				}
+				if entry == nil {
+					continue
+				}
+				op := "PUT"
+				switch entry.Operation() {
+				case jetstream.KeyValueDelete:
+					op = "DELETE"
+				case jetstream.KeyValuePurge:
+					op = "PURGE"
+				}
+				handler(KVWatchEvent{
+					Key:       entry.Key(),
+					Operation: op,
+					Value:     entry.Value(),
+					Revision:  entry.Revision(),
+					Timestamp: entry.Created(),
+				})
 			}
-			op := "PUT"
-			switch entry.Operation() {
-			case jetstream.KeyValueDelete:
-				op = "DELETE"
-			case jetstream.KeyValuePurge:
-				op = "PURGE"
-			}
-			handler(KVWatchEvent{
-				Key:       entry.Key(),
-				Operation: op,
-				Value:     entry.Value(),
-				Revision:  entry.Revision(),
-				Timestamp: entry.Created(),
-			})
 		}
 	}()
 
-	return &kvWatcherImpl{watcher: watcher}, nil
+	return &kvWatcherImpl{watcher: watcher, cancel: watchCancel}, nil
 }
 
 type kvWatcherImpl struct {
 	watcher jetstream.KeyWatcher
+	cancel  context.CancelFunc
 }
 
 func (w *kvWatcherImpl) Stop() error {
+	w.cancel()
 	return w.watcher.Stop()
 }
 

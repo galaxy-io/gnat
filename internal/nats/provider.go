@@ -95,6 +95,7 @@ type Provider interface {
 
 	// Advisories
 	SubscribeAdvisories(ctx context.Context, handler func(Advisory)) error
+	UnsubscribeAdvisories()
 
 	// Publishing
 	Publish(ctx context.Context, subject string, data []byte, headers map[string][]string) error
