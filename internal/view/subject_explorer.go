@@ -436,7 +436,7 @@ func (se *SubjectExplorer) renderPreview(node *components.TreeNode) {
 			if ctx.Err() != nil {
 				return
 			}
-			fetched, err := provider.GetRecentMessagesForSubject(ctx, stream, subject, 5)
+			fetched, err := provider.GetRecentMessagesForSubject(ctx, stream, subject, previewMaxBytes, previewMaxMsgs)
 			if err != nil {
 				continue
 			}

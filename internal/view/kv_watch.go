@@ -19,7 +19,7 @@ import (
 	"github.com/rivo/tview"
 )
 
-const maxWatchEntries = 500
+const maxWatchEntries = 500 // hard cap on retained watch events
 
 type kvWatchState struct {
 	entries []nats.KVWatchEvent
@@ -121,14 +121,9 @@ func (kw *KVWatch) InputHandler() func(event *tcell.EventKey, setFocus func(p tv
 			row, _ := kw.table.GetSelection()
 			idx := row - 1
 			if idx >= 0 && idx < len(s.entries) {
-				// Display is newest first
 				actualIdx := len(s.entries) - 1 - idx
 				entry := s.entries[actualIdx]
-				if err := clipboard.Copy(string(entry.Value)); err != nil {
-					kw.app.ShowError("Clipboard: " + err.Error())
-				} else {
-					kw.app.ShowSuccess(fmt.Sprintf("Copied value for %s", entry.Key))
-				}
+				go kw.yankValue(entry)
 			}
 		case 'c':
 			kw.state.SetAndDraw(kvWatchState{})
@@ -140,6 +135,30 @@ func (kw *KVWatch) InputHandler() func(event *tcell.EventKey, setFocus func(p tv
 			}
 		}
 	})
+}
+
+func (kw *KVWatch) yankValue(evt nats.KVWatchEvent) {
+	provider := kw.app.Provider()
+	if provider == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	kv, err := provider.GetKeyValue(ctx, kw.bucket)
+	if err != nil {
+		kw.app.ShowError("KV: " + err.Error())
+		return
+	}
+	entry, err := kv.GetRevision(ctx, evt.Key, evt.Revision)
+	if err != nil {
+		kw.app.ShowError("Get revision: " + err.Error())
+		return
+	}
+	if err := clipboard.Copy(string(entry.Value())); err != nil {
+		kw.app.ShowError("Clipboard: " + err.Error())
+	} else {
+		kw.app.ShowSuccess(fmt.Sprintf("Copied value for %s", evt.Key))
+	}
 }
 
 func (kw *KVWatch) startWatch() {
@@ -260,7 +279,7 @@ func (kw *KVWatch) renderState(s kvWatchState) {
 			evt.Key,
 			evt.Operation,
 			fmt.Sprintf("%d", evt.Revision),
-			formatBytes(uint64(len(evt.Value))),
+			formatBytes(uint64(evt.ValueSize)),
 		)
 	}
 
@@ -290,19 +309,65 @@ func (kw *KVWatch) renderPreview(displayIdx int) {
 	fmt.Fprintf(&b, "[%s]Operation:[-] %s\n", dim, evt.Operation)
 	fmt.Fprintf(&b, "[%s]Revision:[-]  %d\n", dim, evt.Revision)
 	fmt.Fprintf(&b, "[%s]Time:[-]      %s\n", dim, evt.Timestamp.Format("2006-01-02 15:04:05.000"))
-	fmt.Fprintf(&b, "[%s]Size:[-]      %s\n", dim, formatBytes(uint64(len(evt.Value))))
-	fmt.Fprintf(&b, "\n[%s]Value:[-]\n", dim)
+	fmt.Fprintf(&b, "[%s]Size:[-]      %s\n", dim, formatBytes(uint64(evt.ValueSize)))
 
-	data := string(evt.Value)
-	if json.Valid(evt.Value) {
+	// Fetch value on-demand
+	go kw.fetchAndRenderValue(evt, b.String())
+}
+
+func (kw *KVWatch) fetchAndRenderValue(evt nats.KVWatchEvent, header string) {
+	if evt.Operation != "PUT" {
+		kw.app.QueueUpdateDraw(func() {
+			kw.preview.SetText(header + fmt.Sprintf("\n[dim](%s — no value)[-]", evt.Operation))
+			kw.preview.ScrollToBeginning()
+		})
+		return
+	}
+
+	provider := kw.app.Provider()
+	if provider == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	kv, err := provider.GetKeyValue(ctx, kw.bucket)
+	if err != nil {
+		kw.app.QueueUpdateDraw(func() {
+			kw.preview.SetText(header + fmt.Sprintf("\n[red]Error: %v[-]", err))
+		})
+		return
+	}
+
+	entry, err := kv.GetRevision(ctx, evt.Key, evt.Revision)
+	if err != nil {
+		kw.app.QueueUpdateDraw(func() {
+			kw.preview.SetText(header + fmt.Sprintf("\n[red]Error fetching value: %v[-]", err))
+		})
+		return
+	}
+
+	dim := theme.TagFgDim()
+	value := entry.Value()
+
+	var vb strings.Builder
+	vb.WriteString(header)
+	fmt.Fprintf(&vb, "\n[%s]Value:[-]\n", dim)
+
+	data := string(value)
+	if json.Valid(value) {
 		var prettyJSON bytes.Buffer
-		if err := json.Indent(&prettyJSON, evt.Value, "", "  "); err == nil {
+		if err := json.Indent(&prettyJSON, value, "", "  "); err == nil {
 			data = prettyJSON.String()
 		}
 	}
 	data = strings.ReplaceAll(data, "[", "[[")
-	b.WriteString(data)
+	vb.WriteString(data)
 
-	kw.preview.SetText(b.String())
-	kw.preview.ScrollToBeginning()
+	text := vb.String()
+	kw.app.QueueUpdateDraw(func() {
+		kw.preview.SetText(text)
+		kw.preview.ScrollToBeginning()
+	})
 }

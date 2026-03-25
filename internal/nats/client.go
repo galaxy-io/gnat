@@ -306,7 +306,7 @@ func convertRawMsg(msg *jetstream.RawStreamMsg) *RawMessage {
 	}
 }
 
-func (c *Client) GetRecentMessagesForSubject(ctx context.Context, streamName, subject string, count int) ([]*RawMessage, error) {
+func (c *Client) GetRecentMessagesForSubject(ctx context.Context, streamName, subject string, maxBytes, maxMsgs int) ([]*RawMessage, error) {
 	stream, err := c.js.Stream(ctx, streamName)
 	if err != nil {
 		return nil, err
@@ -347,7 +347,7 @@ func (c *Client) GetRecentMessagesForSubject(ctx context.Context, streamName, su
 	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	batch, err := cons.Fetch(count, jetstream.FetchMaxWait(2*time.Second))
+	batch, err := cons.FetchBytes(maxBytes, jetstream.FetchMaxWait(2*time.Second))
 	if err != nil {
 		return nil, fmt.Errorf("fetching messages: %w", err)
 	}
@@ -372,6 +372,9 @@ func (c *Client) GetRecentMessagesForSubject(ctx context.Context, streamName, su
 			rm.Time = meta.Timestamp
 		}
 		msgs = append(msgs, rm)
+		if maxMsgs > 0 && len(msgs) >= maxMsgs {
+			break
+		}
 	}
 
 	return msgs, nil
@@ -707,7 +710,7 @@ func (c *Client) WatchKeyValue(ctx context.Context, bucket string, handler func(
 				handler(KVWatchEvent{
 					Key:       entry.Key(),
 					Operation: op,
-					Value:     entry.Value(),
+					ValueSize: len(entry.Value()),
 					Revision:  entry.Revision(),
 					Timestamp: entry.Created(),
 				})

@@ -63,7 +63,7 @@ type Provider interface {
 	PurgeStreamSubject(ctx context.Context, name, subject string) error
 	GetMessage(ctx context.Context, streamName string, seq uint64) (*RawMessage, error)
 	GetLastMessageForSubject(ctx context.Context, streamName, subject string) (*RawMessage, error)
-	GetRecentMessagesForSubject(ctx context.Context, streamName, subject string, count int) ([]*RawMessage, error)
+	GetRecentMessagesForSubject(ctx context.Context, streamName, subject string, maxBytes, maxMsgs int) ([]*RawMessage, error)
 	DeleteMessage(ctx context.Context, streamName string, seq uint64) error
 
 	// Consumers
@@ -149,7 +149,7 @@ const (
 type KVWatchEvent struct {
 	Key       string
 	Operation string // "PUT", "DELETE", "PURGE"
-	Value     []byte
+	ValueSize int
 	Revision  uint64
 	Timestamp time.Time
 }

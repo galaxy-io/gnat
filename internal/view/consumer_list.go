@@ -343,7 +343,7 @@ func (cl *ConsumerList) updatePreview(row int) {
 			return
 		}
 
-		msgs, err := provider.GetRecentMessagesForSubject(ctx, streamName, filter, 5)
+		msgs, err := provider.GetRecentMessagesForSubject(ctx, streamName, filter, previewMaxBytes, previewMaxMsgs)
 		if err != nil || len(msgs) == 0 {
 			return
 		}

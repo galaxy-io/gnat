@@ -19,7 +19,8 @@ import (
 	"github.com/rivo/tview"
 )
 
-const maxMessages = 500
+const maxRetainedBytes = 64 * 1024 * 1024 // 64 MB byte budget for retained messages
+const maxRetainedMsgs  = 500              // hard cap on retained message count
 
 // monitorState is the reactive snapshot pushed to the UI via binding.Value.
 // It is built by the processor goroutine and consumed by the render callback
@@ -559,6 +560,7 @@ func (mm *MessageMonitor) subscribe(subject string) {
 // the binding. No UI primitives are touched directly.
 func (mm *MessageMonitor) processMessages(ctx context.Context, myGen int64, msgChan chan nats.LiveMessage, subject string) {
 	var messages []nats.LiveMessage
+	var retainedBytes int
 	batchDone := false
 
 	// batchTimer fires after a gap in initial message replay.
@@ -570,6 +572,13 @@ func (mm *MessageMonitor) processMessages(ctx context.Context, myGen int64, msgC
 	defer renderTicker.Stop()
 
 	dirty := false // true when messages changed since last render
+
+	evict := func() {
+		for len(messages) > 1 && (retainedBytes > maxRetainedBytes || len(messages) > maxRetainedMsgs) {
+			retainedBytes -= len(messages[0].Data)
+			messages = messages[1:]
+		}
+	}
 
 	pushState := func() {
 		if atomic.LoadInt32(&mm.stopped) == 1 {
@@ -611,17 +620,16 @@ func (mm *MessageMonitor) processMessages(ctx context.Context, myGen int64, msgC
 				return
 			}
 
+			retainedBytes += len(msg.Data)
 			messages = append(messages, msg)
-			if len(messages) > maxMessages {
-				messages = messages[len(messages)-maxMessages:]
-			}
+			evict()
 			dirty = true
 
 			if !batchDone {
 				// During initial replay, reset the batch timer on each message.
 				batchTimer.Reset(500 * time.Millisecond)
 				// If we've hit the cap, flush immediately.
-				if len(messages) >= maxMessages {
+				if retainedBytes >= maxRetainedBytes || len(messages) >= maxRetainedMsgs {
 					batchDone = true
 					pushState()
 				}
