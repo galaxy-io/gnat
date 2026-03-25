@@ -110,6 +110,7 @@ func main() {
 
 	// Launch main app
 	app := view.NewApp(provider, cfg, activeProfile)
+	defer app.Close()
 	if err := app.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

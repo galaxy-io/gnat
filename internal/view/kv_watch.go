@@ -40,8 +40,8 @@ type KVWatch struct {
 	mu      sync.Mutex
 	watcher nats.KVWatcher
 
-	stopped     int32
-	stopProcess chan struct{}
+	stopped       int32
+	processCancel context.CancelFunc
 }
 
 // NewKVWatch creates the KV watch view.
@@ -49,7 +49,7 @@ func NewKVWatch(app *App, bucket string) *KVWatch {
 	kw := &KVWatch{
 		app:         app,
 		bucket:      bucket,
-		stopProcess: make(chan struct{}),
+		processCancel: func() {},
 	}
 
 	kw.table = components.NewTable().
@@ -95,10 +95,7 @@ func (kw *KVWatch) Start() {
 
 func (kw *KVWatch) Stop() {
 	atomic.StoreInt32(&kw.stopped, 1)
-	select {
-	case kw.stopProcess <- struct{}{}:
-	default:
-	}
+	kw.processCancel()
 	kw.mu.Lock()
 	if kw.watcher != nil {
 		_ = kw.watcher.Stop()
@@ -181,10 +178,12 @@ func (kw *KVWatch) startWatch() {
 	})
 
 	// Process events
-	go kw.processEvents(eventCh)
+	processCtx, processCancel := context.WithCancel(context.Background())
+	kw.processCancel = processCancel
+	go kw.processEvents(processCtx, eventCh)
 }
 
-func (kw *KVWatch) processEvents(eventCh chan nats.KVWatchEvent) {
+func (kw *KVWatch) processEvents(ctx context.Context, eventCh chan nats.KVWatchEvent) {
 	var entries []nats.KVWatchEvent
 	batchDone := false
 	batchTimer := time.NewTimer(500 * time.Millisecond)
@@ -208,7 +207,7 @@ func (kw *KVWatch) processEvents(eventCh chan nats.KVWatchEvent) {
 
 	for {
 		select {
-		case <-kw.stopProcess:
+		case <-ctx.Done():
 			return
 
 		case evt, ok := <-eventCh:

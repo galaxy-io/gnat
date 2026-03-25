@@ -48,6 +48,7 @@ type App struct {
 	cfg           *config.Config
 
 	stopMetrics chan struct{}
+	ready       chan struct{} // closed once the tview event loop is running
 }
 
 // NewApp creates the application with a NATS provider.
@@ -57,6 +58,7 @@ func NewApp(provider nats.Provider, cfg *config.Config, activeProfileName string
 		cfg:           cfg,
 		activeProfile: binding.NewValue(activeProfileName),
 		stopMetrics:   make(chan struct{}),
+		ready:         make(chan struct{}),
 	}
 	a.buildApp()
 	a.setup()
@@ -197,7 +199,24 @@ func (a *App) setup() {
 
 // Run starts the TUI event loop.
 func (a *App) Run() error {
+	// Signal readiness on a background goroutine. QueueUpdateDraw blocks
+	// until the event loop processes the closure, so we cannot call it
+	// inline before app.Run() — that would deadlock.
+	go func() {
+		a.app.QueueUpdateDraw(func() {
+			select {
+			case <-a.ready:
+			default:
+				close(a.ready)
+			}
+		})
+	}()
 	return a.app.Run()
+}
+
+// Ready returns a channel that is closed once the tview event loop is running.
+func (a *App) Ready() <-chan struct{} {
+	return a.ready
 }
 
 // Provider returns the NATS provider (thread-safe).
@@ -972,8 +991,20 @@ func formatJSONPretty(s string) string {
 	return string(pretty)
 }
 
+// Close releases background resources. Call after Run() returns.
+func (a *App) Close() {
+	close(a.stopMetrics)
+}
+
 func (a *App) startMetricsRefresh() {
 	go func() {
+		// Wait until the tview event loop is running so
+		// QueueUpdateDraw calls don't pile up unboundedly.
+		select {
+		case <-a.ready:
+		case <-a.stopMetrics:
+			return
+		}
 		a.refreshMetrics()
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()

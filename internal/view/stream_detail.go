@@ -27,9 +27,9 @@ type StreamDetail struct {
 	stateView   *tview.TextView
 	clusterView *tview.TextView
 
-	info        *binding.Value[*jetstream.StreamInfo]
-	stopRefresh chan struct{}
-	stopped     int32
+	info          *binding.Value[*jetstream.StreamInfo]
+	refreshCancel context.CancelFunc
+	stopped       int32
 }
 
 // NewStreamDetail creates a stream detail view.
@@ -37,7 +37,7 @@ func NewStreamDetail(app *App, name string) *StreamDetail {
 	sd := &StreamDetail{
 		app:         app,
 		streamName:  name,
-		stopRefresh: make(chan struct{}, 1),
+		refreshCancel: func() {},
 	}
 
 	sd.configView = tview.NewTextView().SetDynamicColors(true)
@@ -91,14 +91,16 @@ func (sd *StreamDetail) Name() string { return sd.streamName }
 
 func (sd *StreamDetail) Start() {
 	atomic.StoreInt32(&sd.stopped, 0)
-	sd.stopRefresh = make(chan struct{}, 1)
+	sd.refreshCancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	sd.refreshCancel = cancel
 	go func() {
 		sd.loadInfo()
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-sd.stopRefresh:
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				sd.loadInfo()
@@ -109,10 +111,7 @@ func (sd *StreamDetail) Start() {
 
 func (sd *StreamDetail) Stop() {
 	atomic.StoreInt32(&sd.stopped, 1)
-	select {
-	case sd.stopRefresh <- struct{}{}:
-	default:
-	}
+	sd.refreshCancel()
 }
 
 func (sd *StreamDetail) Hints() []components.KeyHint {

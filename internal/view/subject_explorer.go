@@ -38,9 +38,9 @@ type SubjectExplorer struct {
 	tree    *components.Tree
 	preview *tview.TextView
 
-	state       *binding.Value[subjectExplorerState]
-	stopRefresh chan struct{}
-	stopped     int32
+	state         *binding.Value[subjectExplorerState]
+	refreshCancel context.CancelFunc
+	stopped       int32
 
 	// Recent messages preview
 	previewCancel  context.CancelFunc
@@ -50,7 +50,7 @@ type SubjectExplorer struct {
 func NewSubjectExplorer(app *App) *SubjectExplorer {
 	se := &SubjectExplorer{
 		app:         app,
-		stopRefresh: make(chan struct{}, 1),
+		refreshCancel: func() {},
 	}
 
 	se.tree = components.NewTree().
@@ -100,14 +100,16 @@ func (se *SubjectExplorer) Name() string { return "Subject Explorer" }
 
 func (se *SubjectExplorer) Start() {
 	atomic.StoreInt32(&se.stopped, 0)
-	se.stopRefresh = make(chan struct{}, 1)
+	se.refreshCancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	se.refreshCancel = cancel
 	go func() {
 		se.refresh()
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-se.stopRefresh:
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				se.refresh()
@@ -118,10 +120,7 @@ func (se *SubjectExplorer) Start() {
 
 func (se *SubjectExplorer) Stop() {
 	atomic.StoreInt32(&se.stopped, 1)
-	select {
-	case se.stopRefresh <- struct{}{}:
-	default:
-	}
+	se.refreshCancel()
 }
 
 func (se *SubjectExplorer) Hints() []components.KeyHint {

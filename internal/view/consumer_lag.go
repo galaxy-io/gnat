@@ -42,9 +42,9 @@ type ConsumerLag struct {
 	table   *components.Table
 	preview *tview.TextView
 
-	state       *binding.Value[consumerLagState]
-	stopRefresh chan struct{}
-	stopped     int32
+	state         *binding.Value[consumerLagState]
+	refreshCancel context.CancelFunc
+	stopped       int32
 
 	mu       sync.Mutex
 	entryMap map[string]*consumerLagEntry // keyed by "stream/consumer"
@@ -53,7 +53,7 @@ type ConsumerLag struct {
 func NewConsumerLag(app *App) *ConsumerLag {
 	cl := &ConsumerLag{
 		app:         app,
-		stopRefresh: make(chan struct{}, 1),
+		refreshCancel: func() {},
 		entryMap:    make(map[string]*consumerLagEntry),
 	}
 
@@ -91,14 +91,16 @@ func (cl *ConsumerLag) Name() string { return "Consumer Lag" }
 
 func (cl *ConsumerLag) Start() {
 	atomic.StoreInt32(&cl.stopped, 0)
-	cl.stopRefresh = make(chan struct{}, 1)
+	cl.refreshCancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cl.refreshCancel = cancel
 	go func() {
 		cl.refreshAll()
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-cl.stopRefresh:
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				cl.refreshAll()
@@ -109,10 +111,7 @@ func (cl *ConsumerLag) Start() {
 
 func (cl *ConsumerLag) Stop() {
 	atomic.StoreInt32(&cl.stopped, 1)
-	select {
-	case cl.stopRefresh <- struct{}{}:
-	default:
-	}
+	cl.refreshCancel()
 }
 
 func (cl *ConsumerLag) Hints() []components.KeyHint {

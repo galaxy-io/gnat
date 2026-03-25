@@ -173,15 +173,15 @@ type Dashboard struct {
 	// Data collection
 	collector *metricsCollector
 
-	stopRefresh chan struct{}
-	stopped     int32
+	refreshCancel context.CancelFunc
+	stopped       int32
 }
 
 // NewDashboard creates the dashboard view.
 func NewDashboard(app *App) *Dashboard {
 	d := &Dashboard{
 		app:         app,
-		stopRefresh: make(chan struct{}, 1),
+		refreshCancel: func() {},
 		collector:   &metricsCollector{},
 	}
 
@@ -360,17 +360,19 @@ func (d *Dashboard) Start() {
 	// Reset lifecycle state so the dashboard works after being re-pushed
 	// (e.g. escaping back from a sub-view calls Stop then Start again).
 	atomic.StoreInt32(&d.stopped, 0)
-	d.stopRefresh = make(chan struct{}, 1)
+	d.refreshCancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	d.refreshCancel = cancel
 
 	d.subscribeAdvisories()
-	go d.pollLoop()
+	go d.pollLoop(ctx)
 }
 
 func (d *Dashboard) Stop() {
 	atomic.StoreInt32(&d.stopped, 1)
-	select {
-	case d.stopRefresh <- struct{}{}:
-	default:
+	d.refreshCancel()
+	if provider := d.app.Provider(); provider != nil {
+		provider.UnsubscribeAdvisories()
 	}
 }
 
@@ -424,7 +426,17 @@ func (d *Dashboard) InputHandler() func(event *tcell.EventKey, setFocus func(p t
 }
 
 // pollLoop runs the 2-second stats ticker and 10-second streams ticker.
-func (d *Dashboard) pollLoop() {
+func (d *Dashboard) pollLoop(ctx context.Context) {
+	// Wait until the tview event loop is running so QueueUpdateDraw
+	// calls are drained immediately instead of piling up in memory.
+	select {
+	case <-d.app.Ready():
+	case <-ctx.Done():
+		return
+	}
+
+	d.subscribeAdvisories()
+
 	// Kick off the first stats and streams fetch concurrently.
 	d.refresh()
 	go d.refreshStreams()
@@ -436,7 +448,7 @@ func (d *Dashboard) pollLoop() {
 
 	for {
 		select {
-		case <-d.stopRefresh:
+		case <-ctx.Done():
 			return
 		case <-statsTicker.C:
 			d.refresh()
