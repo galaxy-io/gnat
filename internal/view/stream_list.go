@@ -126,9 +126,19 @@ func NewStreamList(app *App) *StreamList {
 			}
 			sl.prevMsgs = make(map[string]uint64)
 			sl.prevBytes = make(map[string]uint64)
+			current := make(map[string]struct{}, len(data))
 			for _, s := range data {
 				sl.prevMsgs[s.Config.Name] = s.State.Msgs
 				sl.prevBytes[s.Config.Name] = s.State.Bytes
+				current[s.Config.Name] = struct{}{}
+			}
+			// Prune history for deleted streams.
+			for name := range sl.msgRateHistory {
+				if _, ok := current[name]; !ok {
+					delete(sl.msgRateHistory, name)
+					delete(sl.byteRateHistory, name)
+					delete(sl.rates, name)
+				}
 			}
 			sl.prevTime = now
 			sl.app.QueueUpdateDraw(func() {
