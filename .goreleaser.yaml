@@ -46,7 +46,7 @@ changelog:
 
 release:
   github:
-    owner: atterpac
+    owner: galaxy-io
     name: gnat
   draft: false
   prerelease: auto
@@ -54,11 +54,11 @@ release:
 brews:
   - name: gnat
     repository:
-      owner: atterpac
+      owner: galaxy-io
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Formula
-    homepage: "https://github.com/atterpac/gnat"
+    homepage: "https://github.com/galaxy-io/gnat"
     description: "Terminal UI for NATS JetStream management"
     license: "MIT"
     install: |
