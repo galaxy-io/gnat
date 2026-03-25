@@ -12,7 +12,7 @@ import (
 	natsclient "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/atterpac/gnat/internal/config"
+	"github.com/galaxy-io/gnat/internal/config"
 )
 
 // Client implements Provider using the nats.go SDK.

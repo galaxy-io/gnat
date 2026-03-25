@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/atterpac/gnat/internal/config"
+	"github.com/galaxy-io/gnat/internal/config"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

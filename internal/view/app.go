@@ -18,10 +18,10 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"github.com/atterpac/gnat/internal/clipboard"
-	"github.com/atterpac/gnat/internal/command"
-	"github.com/atterpac/gnat/internal/config"
-	"github.com/atterpac/gnat/internal/nats"
+	"github.com/galaxy-io/gnat/internal/clipboard"
+	"github.com/galaxy-io/gnat/internal/command"
+	"github.com/galaxy-io/gnat/internal/config"
+	"github.com/galaxy-io/gnat/internal/nats"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

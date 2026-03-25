@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/atterpac/gnat/internal/clipboard"
-	"github.com/atterpac/gnat/internal/nats"
+	"github.com/galaxy-io/gnat/internal/clipboard"
+	"github.com/galaxy-io/gnat/internal/nats"
 	"github.com/atterpac/jig/binding"
 	"github.com/atterpac/jig/components"
 	"github.com/atterpac/jig/theme"
