@@ -7,6 +7,7 @@ A [NATS](https://nats.io) JetStream TUI that won't bug you
 [![GitHub Release](https://img.shields.io/github/v/release/galaxy-io/gnat)](https://github.com/galaxy-io/gnat/releases)
 [![License](https://img.shields.io/github/license/galaxy-io/gnat)](https://github.com/galaxy-io/gnat/blob/main/LICENSE)
 ![GitHub Downloads](https://img.shields.io/github/downloads/galaxy-io/gnat/total)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/galaxy-io/gnat)
 
 </div>
 
