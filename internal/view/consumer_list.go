@@ -1,12 +1,16 @@
 package view
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/atterpac/gnat/internal/clipboard"
+	"github.com/atterpac/gnat/internal/nats"
 	"github.com/atterpac/jig/binding"
 	"github.com/atterpac/jig/components"
 	"github.com/atterpac/jig/theme"
@@ -28,6 +32,12 @@ type ConsumerList struct {
 
 	// Redelivery alert tracking
 	prevRedelivered map[string]int
+
+	// Recent messages preview
+	previewMu       sync.Mutex
+	previewCancel   context.CancelFunc
+	previewMessages []*nats.RawMessage
+	previewConsumer string
 }
 
 // NewConsumerList creates the consumer list view.
@@ -292,7 +302,76 @@ func (cl *ConsumerList) updatePreview(row int) {
 		cl.preview.SetText("")
 		return
 	}
+
+	name := c.Config.Name
+	if name == "" {
+		name = c.Config.Durable
+	}
+
+	// Cancel any in-flight preview fetch
+	cl.previewMu.Lock()
+	if cl.previewCancel != nil {
+		cl.previewCancel()
+	}
+	cl.previewMessages = nil
+	cl.previewConsumer = name
+	cl.previewMu.Unlock()
+
+	// Render metadata immediately
+	cl.renderPreviewText(c, nil)
+
+	// Fetch recent messages for the consumer's filter subject
+	filter := c.Config.FilterSubject
+	if filter == "" && len(c.Config.FilterSubjects) > 0 {
+		filter = c.Config.FilterSubjects[0]
+	}
+	if filter == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	cl.previewMu.Lock()
+	cl.previewCancel = cancel
+	cl.previewMu.Unlock()
+
+	streamName := cl.streamName
+
+	go func() {
+		defer cancel()
+		provider := cl.app.Provider()
+		if provider == nil {
+			return
+		}
+
+		msgs, err := provider.GetRecentMessagesForSubject(ctx, streamName, filter, 5)
+		if err != nil || len(msgs) == 0 {
+			return
+		}
+
+		cl.previewMu.Lock()
+		if cl.previewConsumer != name {
+			cl.previewMu.Unlock()
+			return
+		}
+		cl.previewMessages = msgs
+		cl.previewMu.Unlock()
+
+		cl.app.QueueUpdateDraw(func() {
+			cl.previewMu.Lock()
+			if cl.previewConsumer != name {
+				cl.previewMu.Unlock()
+				return
+			}
+			currentMsgs := cl.previewMessages
+			cl.previewMu.Unlock()
+			cl.renderPreviewText(c, currentMsgs)
+		})
+	}()
+}
+
+func (cl *ConsumerList) renderPreviewText(c *jetstream.ConsumerInfo, msgs []*nats.RawMessage) {
 	dim := theme.TagFgDim()
+	accent := theme.TagAccent()
 
 	name := c.Config.Name
 	if name == "" {
@@ -306,35 +385,42 @@ func (cl *ConsumerList) updatePreview(row int) {
 		filter = fmt.Sprintf("%v", c.Config.FilterSubjects)
 	}
 
-	text := fmt.Sprintf(
-		"[%s]Name:[-]         %s\n"+
-			"[%s]Type:[-]         %s\n"+
-			"[%s]Ack Policy:[-]   %s\n"+
-			"[%s]Filter:[-]       %s\n"+
-			"[%s]Max Deliver:[-]  %d\n"+
-			"[%s]Max Ack Pend:[-] %d\n"+
-			"\n"+
-			"[%s]Pending:[-]      %s\n"+
-			"[%s]Ack Pending:[-]  %d\n"+
-			"[%s]Redelivered:[-]  %d\n"+
-			"[%s]Waiting:[-]      %d\n"+
-			"[%s]Delivered:[-]    #%d\n"+
-			"[%s]Ack Floor:[-]    #%d",
-		dim, name,
-		dim, ctype,
-		dim, ackPolicyString(c.Config.AckPolicy),
-		dim, filter,
-		dim, c.Config.MaxDeliver,
-		dim, c.Config.MaxAckPending,
-		dim, formatNumber(c.NumPending),
-		dim, c.NumAckPending,
-		dim, c.NumRedelivered,
-		dim, c.NumWaiting,
-		dim, c.Delivered.Consumer,
-		dim, c.AckFloor.Consumer,
-	)
+	var b strings.Builder
+	fmt.Fprintf(&b, "[%s]Name:[-]         %s\n", dim, name)
+	fmt.Fprintf(&b, "[%s]Type:[-]         %s\n", dim, ctype)
+	fmt.Fprintf(&b, "[%s]Ack Policy:[-]   %s\n", dim, ackPolicyString(c.Config.AckPolicy))
+	fmt.Fprintf(&b, "[%s]Filter:[-]       %s\n", dim, filter)
+	fmt.Fprintf(&b, "[%s]Max Deliver:[-]  %d\n", dim, c.Config.MaxDeliver)
+	fmt.Fprintf(&b, "[%s]Max Ack Pend:[-] %d\n", dim, c.Config.MaxAckPending)
+	fmt.Fprintf(&b, "\n")
+	fmt.Fprintf(&b, "[%s]Pending:[-]      %s\n", dim, formatNumber(c.NumPending))
+	fmt.Fprintf(&b, "[%s]Ack Pending:[-]  %d\n", dim, c.NumAckPending)
+	fmt.Fprintf(&b, "[%s]Redelivered:[-]  %d\n", dim, c.NumRedelivered)
+	fmt.Fprintf(&b, "[%s]Waiting:[-]      %d\n", dim, c.NumWaiting)
+	fmt.Fprintf(&b, "[%s]Delivered:[-]    #%d\n", dim, c.Delivered.Consumer)
+	fmt.Fprintf(&b, "[%s]Ack Floor:[-]    #%d\n", dim, c.AckFloor.Consumer)
 
-	cl.preview.SetText(text)
+	if len(msgs) > 0 {
+		fmt.Fprintf(&b, "\n[%s]Recent Messages:[-]\n", dim)
+		for _, msg := range msgs {
+			ts := msg.Time.Format("15:04:05")
+			fmt.Fprintf(&b, "\n  [%s]%s[-] [%s]seq=%d  %s  %s[-]\n", accent, msg.Subject, dim, msg.Sequence, ts, formatBytes(uint64(len(msg.Data))))
+			payload := string(msg.Data)
+			if json.Valid(msg.Data) {
+				var pretty bytes.Buffer
+				if err := json.Indent(&pretty, msg.Data, "    ", "  "); err == nil {
+					payload = pretty.String()
+				}
+			}
+			payload = strings.ReplaceAll(payload, "[", "[[")
+			if len(payload) > 500 {
+				payload = payload[:500] + "..."
+			}
+			fmt.Fprintf(&b, "    %s\n", payload)
+		}
+	}
+
+	cl.preview.SetText(b.String())
 }
 
 func ackPolicyString(p jetstream.AckPolicy) string {

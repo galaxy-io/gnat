@@ -282,6 +282,77 @@ func convertRawMsg(msg *jetstream.RawStreamMsg) *RawMessage {
 	}
 }
 
+func (c *Client) GetRecentMessagesForSubject(ctx context.Context, streamName, subject string, count int) ([]*RawMessage, error) {
+	stream, err := c.js.Stream(ctx, streamName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create an ephemeral consumer filtered to the subject, delivering the last N messages.
+	cons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+		FilterSubject:     subject,
+		DeliverPolicy:     jetstream.DeliverLastPerSubjectPolicy,
+		AckPolicy:         jetstream.AckNonePolicy,
+		InactiveThreshold: 30 * time.Second,
+	})
+	if err != nil {
+		// Fall back to DeliverAll if LastPerSubject isn't applicable (single subject)
+		cons, err = stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+			FilterSubject:     subject,
+			DeliverPolicy:     jetstream.DeliverAllPolicy,
+			AckPolicy:         jetstream.AckNonePolicy,
+			InactiveThreshold: 30 * time.Second,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("creating consumer: %w", err)
+		}
+	}
+
+	consName := ""
+	if info, err := cons.Info(ctx); err == nil && info != nil {
+		consName = info.Name
+	}
+	defer func() {
+		if consName != "" {
+			dctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = stream.DeleteConsumer(dctx, consName)
+		}
+	}()
+
+	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	batch, err := cons.Fetch(count, jetstream.FetchMaxWait(2*time.Second))
+	if err != nil {
+		return nil, fmt.Errorf("fetching messages: %w", err)
+	}
+
+	var msgs []*RawMessage
+	for msg := range batch.Messages() {
+		if fetchCtx.Err() != nil {
+			break
+		}
+		meta, _ := msg.Metadata()
+		headers := make(map[string][]string)
+		for k, v := range msg.Headers() {
+			headers[k] = v
+		}
+		rm := &RawMessage{
+			Subject: msg.Subject(),
+			Data:    msg.Data(),
+			Headers: headers,
+		}
+		if meta != nil {
+			rm.Sequence = meta.Sequence.Stream
+			rm.Time = meta.Timestamp
+		}
+		msgs = append(msgs, rm)
+	}
+
+	return msgs, nil
+}
+
 func (c *Client) DeleteMessage(ctx context.Context, streamName string, seq uint64) error {
 	stream, err := c.js.Stream(ctx, streamName)
 	if err != nil {
