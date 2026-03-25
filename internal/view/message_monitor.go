@@ -72,8 +72,8 @@ type MessageMonitor struct {
 	filterText   string
 
 	// Lifecycle
-	stopped     int32
-	stopProcess chan struct{} // signals processor goroutine to exit
+	stopped       int32
+	processCancel context.CancelFunc
 
 	// Initial subject (for auto-subscribe on Start)
 	initSubject string
@@ -95,7 +95,7 @@ func NewMessageMonitorWithSubject(app *App, subject string) *MessageMonitor {
 		useJetStream:  true,
 		deliverPolicy: nats.DeliverAll,
 		initSubject:   subject,
-		stopProcess:   make(chan struct{}),
+		processCancel: func() {},
 	}
 
 	mm.buildUI(subject)
@@ -260,11 +260,7 @@ func (mm *MessageMonitor) Start() {
 
 func (mm *MessageMonitor) Stop() {
 	atomic.StoreInt32(&mm.stopped, 1)
-	// Signal the processor goroutine to exit.
-	select {
-	case mm.stopProcess <- struct{}{}:
-	default:
-	}
+	mm.processCancel()
 	mm.doUnsubscribe()
 }
 
@@ -488,7 +484,9 @@ func (mm *MessageMonitor) subscribe(subject string) {
 	})
 
 	// Start processor goroutine for this subscription.
-	go mm.processMessages(myGen, msgChan, subject)
+	processCtx, processCancel := context.WithCancel(context.Background())
+	mm.processCancel = processCancel
+	go mm.processMessages(processCtx, myGen, msgChan, subject)
 
 	// Handler: never blocks, never holds locks. Channel send is guarded by
 	// recover so a closed-channel panic in the narrow unsubscribe race is safe.
@@ -559,7 +557,7 @@ func (mm *MessageMonitor) subscribe(subject string) {
 // processMessages runs in its own goroutine for the lifetime of one subscription.
 // It reads from msgChan, accumulates messages, and pushes state snapshots via
 // the binding. No UI primitives are touched directly.
-func (mm *MessageMonitor) processMessages(myGen int64, msgChan chan nats.LiveMessage, subject string) {
+func (mm *MessageMonitor) processMessages(ctx context.Context, myGen int64, msgChan chan nats.LiveMessage, subject string) {
 	var messages []nats.LiveMessage
 	batchDone := false
 
@@ -604,7 +602,7 @@ func (mm *MessageMonitor) processMessages(myGen int64, msgChan chan nats.LiveMes
 
 	for {
 		select {
-		case <-mm.stopProcess:
+		case <-ctx.Done():
 			return
 
 		case msg, ok := <-msgChan:
@@ -657,12 +655,7 @@ func (mm *MessageMonitor) doUnsubscribe() {
 	mm.mu.Unlock()
 
 	// Signal processor to exit.
-	select {
-	case mm.stopProcess <- struct{}{}:
-	default:
-	}
-	// Re-create the stop channel for the next processor goroutine.
-	mm.stopProcess = make(chan struct{})
+	mm.processCancel()
 
 	// Unsubscribe and close channel off any critical path.
 	if sub != nil {
