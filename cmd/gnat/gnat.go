@@ -13,9 +13,9 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"github.com/atterpac/gnat/internal/config"
-	gnatnats "github.com/atterpac/gnat/internal/nats"
-	"github.com/atterpac/gnat/internal/view"
+	"github.com/galaxy-io/gnat/internal/config"
+	gnatnats "github.com/galaxy-io/gnat/internal/nats"
+	"github.com/galaxy-io/gnat/internal/view"
 )
 
 const splashLogo = `

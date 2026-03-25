@@ -1,4 +1,4 @@
-module github.com/atterpac/gnat
+module github.com/galaxy-io/gnat
 
 go 1.24.0
 
