@@ -64,8 +64,13 @@ func main() {
 	}
 
 	if *liveMode {
+		// Subscribe to core NATS subjects so messages actually flow
+		// (without subscribers, published core msgs are silently dropped by the server).
+		for _, subj := range []string{"ping", "status.>", "telemetry.>", "chat.>"} {
+			nc.Subscribe(subj, func(msg *nats.Msg) {}) //nolint:errcheck
+		}
 		fmt.Printf("\nStarting live publisher (rate: %v)...\n", *liveRate)
-		fmt.Println("Publishing to: orders.*, events.*, logs.*, metrics.*, notify.*")
+		fmt.Println("Publishing to: orders.*, events.*, logs.*, metrics.*, notify.*, ping, status.*, chat.*")
 		fmt.Println("Press Ctrl+C to stop\n")
 		runLivePublisher(nc, js, *liveRate)
 	}
@@ -367,7 +372,22 @@ func seedMessages(ctx context.Context, js jetstream.JetStream, nc *nats.Conn) {
 		}
 		published++
 	}
-	fmt.Printf("published %d messages across all streams\n", published)
+	fmt.Printf("published %d JetStream messages across all streams\n", published)
+
+	// Publish core NATS messages (no JetStream required)
+	corePublished := 0
+	coreSubjects := []string{"ping", "status.api", "status.worker", "chat.general", "chat.random", "telemetry.heartbeat"}
+	for i := 0; i < 100; i++ {
+		subj := coreSubjects[rand.Intn(len(coreSubjects))]
+		data := fmt.Sprintf(`{"ts":"%s","seq":%d,"source":"seeder"}`, time.Now().Format(time.RFC3339Nano), i)
+		if err := nc.Publish(subj, []byte(data)); err != nil {
+			log.Printf("core publish %s: %v", subj, err)
+			continue
+		}
+		corePublished++
+	}
+	_ = nc.Flush()
+	fmt.Printf("published %d core NATS messages\n", corePublished)
 
 	// Consume some messages to create realistic ack/pending state
 	simulateConsumption(ctx, js)
@@ -845,43 +865,62 @@ func runLivePublisher(nc *nats.Conn, js jetstream.JetStream, baseRate time.Durat
 		var subject, data string
 		now := time.Now().Format(time.RFC3339Nano)
 
-		// Rotate through different message types
-		switch rand.Intn(5) {
-		case 0: // Order
+		// Rotate through different message types — cases 0-4 are JetStream,
+		// cases 5-6 are core NATS (no stream required).
+		useCore := false
+		switch rand.Intn(7) {
+		case 0: // Order (JS)
 			status := statuses[rand.Intn(len(statuses))]
 			region := regions[rand.Intn(len(regions))]
 			subject = fmt.Sprintf("orders.%s", status)
 			data = fmt.Sprintf(`{"ts":"%s","order_id":"ORD-%06d","status":"%s","region":"%s","amount":%.2f}`,
 				now, rand.Intn(999999), status, region, rand.Float64()*500+5)
 
-		case 1: // Event
+		case 1: // Event (JS)
 			evt := eventTypes[rand.Intn(len(eventTypes))]
 			subject = fmt.Sprintf("events.%s", evt)
 			data = fmt.Sprintf(`{"ts":"%s","event":"%s","user_id":"usr-%05d","session":"%08x"}`,
 				now, evt, rand.Intn(10000), rand.Uint32())
 
-		case 2: // Log
+		case 2: // Log (JS)
 			level := levels[rand.Intn(len(levels))]
 			svc := services[rand.Intn(len(services))]
 			subject = fmt.Sprintf("logs.%s.%s", level, svc)
 			data = fmt.Sprintf(`{"ts":"%s","level":"%s","service":"%s","msg":"Request processed","trace":"%08x"}`,
 				now, level, svc, rand.Uint32())
 
-		case 3: // Metric
+		case 3: // Metric (JS)
 			metric := metricNames[rand.Intn(len(metricNames))]
 			host := fmt.Sprintf("host-%02d", rand.Intn(10))
 			subject = fmt.Sprintf("metrics.%s.%s", host, metric)
 			data = fmt.Sprintf(`{"ts":"%s","metric":"%s","host":"%s","value":%.2f}`,
 				now, metric, host, rand.Float64()*100)
 
-		case 4: // Notification
+		case 4: // Notification (JS)
 			ch := channels[rand.Intn(len(channels))]
 			subject = fmt.Sprintf("notify.%s", ch)
 			data = fmt.Sprintf(`{"ts":"%s","channel":"%s","recipient":"user-%04d","priority":"%s"}`,
 				now, ch, rand.Intn(5000), []string{"low", "normal", "high"}[rand.Intn(3)])
+
+		case 5: // Heartbeat / status (core NATS)
+			useCore = true
+			coreSubjects := []string{"ping", "status.api", "status.worker", "telemetry.heartbeat"}
+			subject = coreSubjects[rand.Intn(len(coreSubjects))]
+			data = fmt.Sprintf(`{"ts":"%s","source":"seeder","seq":%d}`, now, msgCount)
+
+		case 6: // Chat (core NATS)
+			useCore = true
+			rooms := []string{"general", "random", "dev", "ops"}
+			subject = fmt.Sprintf("chat.%s", rooms[rand.Intn(len(rooms))])
+			data = fmt.Sprintf(`{"ts":"%s","user":"bot-%02d","text":"message #%d"}`, now, rand.Intn(10), msgCount)
 		}
 
-		if _, err := js.Publish(ctx, subject, []byte(data)); err != nil {
+		if useCore {
+			if err := nc.Publish(subject, []byte(data)); err != nil {
+				log.Printf("publish error: %v", err)
+				continue
+			}
+		} else if _, err := js.Publish(ctx, subject, []byte(data)); err != nil {
 			log.Printf("publish error: %v", err)
 			continue
 		}
