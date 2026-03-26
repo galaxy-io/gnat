@@ -21,6 +21,9 @@ type Client struct {
 	nc     *natsclient.Conn
 	js     jetstream.JetStream
 	advSub *natsclient.Subscription
+
+	jsOnce    sync.Once
+	jsEnabled bool
 }
 
 // Connect establishes a NATS connection and creates a JetStream context.
@@ -131,6 +134,16 @@ func (c *Client) ServerInfo() ServerInfo {
 		Servers:    c.nc.Servers(),
 		Reconnects: stats.Reconnects,
 	}
+}
+
+// JetStream availability
+
+func (c *Client) JetStreamEnabled(ctx context.Context) bool {
+	c.jsOnce.Do(func() {
+		_, err := c.js.AccountInfo(ctx)
+		c.jsEnabled = err == nil
+	})
+	return c.jsEnabled
 }
 
 // Account
@@ -665,6 +678,7 @@ func (c *Client) Reconnect(ctx context.Context, cfg config.ConnectionConfig) err
 
 	c.nc = nc
 	c.js = js
+	c.jsOnce = sync.Once{} // reset so JetStreamEnabled re-probes
 	return nil
 }
 

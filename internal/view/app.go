@@ -994,6 +994,9 @@ func formatJSONPretty(s string) string {
 // Close releases background resources. Call after Run() returns.
 func (a *App) Close() {
 	close(a.stopMetrics)
+	if p := a.Provider(); p != nil {
+		p.Close()
+	}
 }
 
 func (a *App) startMetricsRefresh() {
@@ -1022,6 +1025,11 @@ func (a *App) startMetricsRefresh() {
 func (a *App) refreshMetrics() {
 	provider := a.Provider()
 	if provider == nil {
+		logger.Debugf("refreshMetrics: provider is nil")
+		return
+	}
+
+	if !provider.JetStreamEnabled(context.Background()) {
 		return
 	}
 
