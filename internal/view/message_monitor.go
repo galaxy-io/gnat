@@ -256,6 +256,8 @@ func (mm *MessageMonitor) Start() {
 	}
 	if subject != "" {
 		go mm.subscribe(subject)
+	} else {
+		mm.app.app.SetFocus(mm.subjectInput)
 	}
 }
 

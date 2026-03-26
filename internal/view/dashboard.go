@@ -366,6 +366,7 @@ func (d *Dashboard) CommandContext() CommandViewContext { return CommandViewCont
 func (d *Dashboard) Name() string { return "Dashboard" }
 
 func (d *Dashboard) Start() {
+	logger.Debugf("dashboard: Start")
 	// Reset lifecycle state so the dashboard works after being re-pushed
 	// (e.g. escaping back from a sub-view calls Stop then Start again).
 	atomic.StoreInt32(&d.stopped, 0)
@@ -377,6 +378,7 @@ func (d *Dashboard) Start() {
 }
 
 func (d *Dashboard) Stop() {
+	logger.Debugf("dashboard: Stop")
 	atomic.StoreInt32(&d.stopped, 1)
 	d.refreshCancel()
 	if provider := d.app.Provider(); provider != nil {
@@ -435,11 +437,14 @@ func (d *Dashboard) InputHandler() func(event *tcell.EventKey, setFocus func(p t
 
 // pollLoop runs the 2-second stats ticker and 10-second streams ticker.
 func (d *Dashboard) pollLoop(ctx context.Context) {
+	logger.Debugf("dashboard: pollLoop waiting for ready")
 	// Wait until the tview event loop is running so QueueUpdateDraw
 	// calls are drained immediately instead of piling up in memory.
 	select {
 	case <-d.app.Ready():
+		logger.Debugf("dashboard: pollLoop ready, starting refresh cycle")
 	case <-ctx.Done():
+		logger.Debugf("dashboard: pollLoop cancelled before ready")
 		return
 	}
 
@@ -543,6 +548,7 @@ func (d *Dashboard) refresh() {
 		snap.streamMsgs = prev.streamMsgs
 	}
 
+	logger.Debugf("dashboard refresh: setting snapshot jsAvailable=%v rtt=%d", snap.jsAvailable, len(snap.rttHistory))
 	d.metrics.SetAndDraw(snap)
 }
 
@@ -593,6 +599,7 @@ func (d *Dashboard) refreshStreams() {
 }
 
 func (d *Dashboard) renderMetrics(snap metricsSnapshot) {
+	logger.Debugf("dashboard renderMetrics called jsAvailable=%v", snap.jsAvailable)
 	// Row 1: Update metric cards
 	d.cardMsgsIn.
 		SetValue(formatRate(snap.msgsInPerSec)).
