@@ -4,8 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"runtime"
 	"sync"
@@ -79,14 +77,6 @@ func main() {
 	defer logger.Close()
 	if flagDebug {
 		fmt.Fprintf(os.Stderr, "Debug log: %s\n", logPath)
-		// Start pprof server for memory profiling
-		go func() {
-			addr := "localhost:6060"
-			fmt.Fprintf(os.Stderr, "pprof: http://%s/debug/pprof/\n", addr)
-			if err := http.ListenAndServe(addr, nil); err != nil {
-				fmt.Fprintf(os.Stderr, "pprof server error: %v\n", err)
-			}
-		}()
 	}
 	logger.Debugf("version=%s commit=%s built=%s", version, commit, buildDate)
 	logger.Debugf("go=%s os=%s arch=%s cpus=%d", runtime.Version(), runtime.GOOS, runtime.GOARCH, runtime.NumCPU())
