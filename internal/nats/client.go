@@ -192,40 +192,64 @@ func (c *Client) StreamNameBySubject(ctx context.Context, subject string) (strin
 // Stream operations
 
 func (c *Client) StreamSubjects(ctx context.Context, streamName string) (map[string]uint64, error) {
-	// Try SDK first
-	stream, err := c.js.Stream(ctx, streamName)
-	if err != nil {
-		return nil, err
-	}
-	info, err := stream.Info(ctx, jetstream.WithSubjectFilter(">"))
-	if err == nil && len(info.State.Subjects) > 0 {
-		return info.State.Subjects, nil
-	}
-	// Fallback to raw API for older servers that reject the SDK's request format
-	return c.streamSubjectsRaw(streamName)
+	return c.streamSubjectsPaginated(ctx, streamName)
 }
 
-func (c *Client) streamSubjectsRaw(streamName string) (map[string]uint64, error) {
-	req := []byte(`{"subjects_filter":">"}`)
-	msg, err := c.nc.Request(fmt.Sprintf("$JS.API.STREAM.INFO.%s", streamName), req, 10*time.Second)
-	if err != nil {
-		return nil, err
+// streamSubjectsPaginated fetches the subject→count map using the raw
+// JetStream API with offset-based pagination so that large subject sets
+// are retrieved in bounded pages rather than a single unbounded response.
+func (c *Client) streamSubjectsPaginated(ctx context.Context, streamName string) (map[string]uint64, error) {
+	apiSubject := fmt.Sprintf("$JS.API.STREAM.INFO.%s", streamName)
+	all := make(map[string]uint64)
+	offset := 0
+
+	for {
+		if ctx.Err() != nil {
+			return all, ctx.Err()
+		}
+
+		req := fmt.Sprintf(`{"subjects_filter":">","offset":%d}`, offset)
+		msg, err := c.nc.RequestWithContext(ctx, apiSubject, []byte(req))
+		if err != nil {
+			if len(all) > 0 {
+				return all, nil // return what we have
+			}
+			return nil, err
+		}
+
+		var resp struct {
+			Total  int `json:"total"`
+			Offset int `json:"offset"`
+			Limit  int `json:"limit"`
+			State  struct {
+				Subjects map[string]uint64 `json:"subjects"`
+			} `json:"state"`
+			Error *struct {
+				Description string `json:"description"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(msg.Data, &resp); err != nil {
+			if len(all) > 0 {
+				return all, nil
+			}
+			return nil, err
+		}
+		if resp.Error != nil {
+			return nil, fmt.Errorf("stream %s subjects: %s", streamName, resp.Error.Description)
+		}
+
+		for subj, count := range resp.State.Subjects {
+			all[subj] = count
+		}
+
+		// No subjects in response or we've collected them all — done.
+		if len(resp.State.Subjects) == 0 || len(all) >= resp.Total {
+			break
+		}
+		offset = len(all)
 	}
-	var resp struct {
-		State struct {
-			Subjects map[string]uint64 `json:"subjects"`
-		} `json:"state"`
-		Error *struct {
-			Description string `json:"description"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		return nil, err
-	}
-	if resp.Error != nil {
-		return nil, fmt.Errorf("stream %s subjects: %s", streamName, resp.Error.Description)
-	}
-	return resp.State.Subjects, nil
+
+	return all, nil
 }
 
 func (c *Client) PurgeStream(ctx context.Context, name string) error {
@@ -282,7 +306,7 @@ func convertRawMsg(msg *jetstream.RawStreamMsg) *RawMessage {
 	}
 }
 
-func (c *Client) GetRecentMessagesForSubject(ctx context.Context, streamName, subject string, count int) ([]*RawMessage, error) {
+func (c *Client) GetRecentMessagesForSubject(ctx context.Context, streamName, subject string, maxBytes, maxMsgs int) ([]*RawMessage, error) {
 	stream, err := c.js.Stream(ctx, streamName)
 	if err != nil {
 		return nil, err
@@ -323,7 +347,7 @@ func (c *Client) GetRecentMessagesForSubject(ctx context.Context, streamName, su
 	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	batch, err := cons.Fetch(count, jetstream.FetchMaxWait(2*time.Second))
+	batch, err := cons.FetchBytes(maxBytes, jetstream.FetchMaxWait(2*time.Second))
 	if err != nil {
 		return nil, fmt.Errorf("fetching messages: %w", err)
 	}
@@ -348,6 +372,9 @@ func (c *Client) GetRecentMessagesForSubject(ctx context.Context, streamName, su
 			rm.Time = meta.Timestamp
 		}
 		msgs = append(msgs, rm)
+		if maxMsgs > 0 && len(msgs) >= maxMsgs {
+			break
+		}
 	}
 
 	return msgs, nil
@@ -511,6 +538,13 @@ func (c *Client) DeleteObjectStore(ctx context.Context, bucket string) error {
 // Advisories
 
 func (c *Client) SubscribeAdvisories(ctx context.Context, handler func(Advisory)) error {
+	c.mu.Lock()
+	if c.advSub != nil {
+		_ = c.advSub.Unsubscribe()
+		c.advSub = nil
+	}
+	c.mu.Unlock()
+
 	sub, err := c.nc.Subscribe("$JS.EVENT.ADVISORY.>", func(msg *natsclient.Msg) {
 		adv := parseAdvisory(msg)
 		handler(adv)
@@ -518,10 +552,22 @@ func (c *Client) SubscribeAdvisories(ctx context.Context, handler func(Advisory)
 	if err != nil {
 		return err
 	}
+	// Cap the pending buffer so a high-volume advisory stream cannot
+	// grow unboundedly 
+	_ = sub.SetPendingLimits(1024, 8*1024*1024) // 1024 msgs / 8 MB
 	c.mu.Lock()
 	c.advSub = sub
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *Client) UnsubscribeAdvisories() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.advSub != nil {
+		_ = c.advSub.Unsubscribe()
+		c.advSub = nil
+	}
 }
 
 func parseAdvisory(msg *natsclient.Msg) Advisory {
@@ -634,41 +680,54 @@ func (c *Client) WatchKeyValue(ctx context.Context, bucket string, handler func(
 		return nil, err
 	}
 
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				// Prevent silent goroutine death from handler panics
 			}
 		}()
-		for entry := range watcher.Updates() {
-			if entry == nil {
-				continue
+		updates := watcher.Updates()
+		for {
+			select {
+			case <-watchCtx.Done():
+				return
+			case entry, ok := <-updates:
+				if !ok {
+					return
+				}
+				if entry == nil {
+					continue
+				}
+				op := "PUT"
+				switch entry.Operation() {
+				case jetstream.KeyValueDelete:
+					op = "DELETE"
+				case jetstream.KeyValuePurge:
+					op = "PURGE"
+				}
+				handler(KVWatchEvent{
+					Key:       entry.Key(),
+					Operation: op,
+					ValueSize: len(entry.Value()),
+					Revision:  entry.Revision(),
+					Timestamp: entry.Created(),
+				})
 			}
-			op := "PUT"
-			switch entry.Operation() {
-			case jetstream.KeyValueDelete:
-				op = "DELETE"
-			case jetstream.KeyValuePurge:
-				op = "PURGE"
-			}
-			handler(KVWatchEvent{
-				Key:       entry.Key(),
-				Operation: op,
-				Value:     entry.Value(),
-				Revision:  entry.Revision(),
-				Timestamp: entry.Created(),
-			})
 		}
 	}()
 
-	return &kvWatcherImpl{watcher: watcher}, nil
+	return &kvWatcherImpl{watcher: watcher, cancel: watchCancel}, nil
 }
 
 type kvWatcherImpl struct {
 	watcher jetstream.KeyWatcher
+	cancel  context.CancelFunc
 }
 
 func (w *kvWatcherImpl) Stop() error {
+	w.cancel()
 	return w.watcher.Stop()
 }
 

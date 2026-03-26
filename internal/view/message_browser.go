@@ -18,7 +18,10 @@ import (
 	"github.com/rivo/tview"
 )
 
-const browserPageSize = 50
+const browserPageBytes = 8 * 1024 * 1024  // 8 MB byte budget per page
+const browserPageMsgs  = 50               // hard cap on messages per page
+const previewMaxBytes  = 1 * 1024 * 1024  // 1 MB byte budget for preview fetches
+const previewMaxMsgs   = 5                // hard cap on preview messages
 
 type MessageBrowser struct {
 	*components.MasterDetailView
@@ -244,16 +247,7 @@ func (mb *MessageBrowser) loadInitial() {
 		return
 	}
 
-	// Load last page
-	startSeq := mb.firstSeq
-	if mb.lastSeq >= uint64(browserPageSize) {
-		startSeq = mb.lastSeq - uint64(browserPageSize) + 1
-	}
-	if startSeq < mb.firstSeq {
-		startSeq = mb.firstSeq
-	}
-
-	mb.fetchPage(ctx, provider, startSeq, mb.lastSeq)
+	mb.fetchPageReverse(ctx, provider, mb.lastSeq)
 }
 
 func (mb *MessageBrowser) loadFromSeq(seq uint64) {
@@ -269,18 +263,16 @@ func (mb *MessageBrowser) loadFromSeq(seq uint64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	endSeq := seq + uint64(browserPageSize) - 1
 	mb.mu.Lock()
-	if endSeq > mb.lastSeq {
-		endSeq = mb.lastSeq
-	}
+	lastSeq := mb.lastSeq
 	mb.mu.Unlock()
 
-	mb.fetchPage(ctx, provider, seq, endSeq)
+	mb.fetchPageForward(ctx, provider, seq, lastSeq)
 }
 
-func (mb *MessageBrowser) fetchPage(ctx context.Context, provider nats.Provider, startSeq, endSeq uint64) {
+func (mb *MessageBrowser) fetchPageForward(ctx context.Context, provider nats.Provider, startSeq, endSeq uint64) {
 	var msgs []*nats.RawMessage
+	var totalBytes int
 	skipped := 0
 
 	for seq := startSeq; seq <= endSeq; seq++ {
@@ -291,15 +283,64 @@ func (mb *MessageBrowser) fetchPage(ctx context.Context, provider nats.Provider,
 		msg, err := provider.GetMessage(ctx, mb.streamName, seq)
 		if err != nil {
 			skipped++
-			if skipped > browserPageSize {
+			if skipped > 500 {
 				break
 			}
 			continue
 		}
+		totalBytes += len(msg.Data)
 		msgs = append(msgs, msg)
-		if len(msgs) >= browserPageSize {
+		if totalBytes >= browserPageBytes || len(msgs) >= browserPageMsgs {
 			break
 		}
+	}
+
+	if atomic.LoadInt32(&mb.stopped) == 1 {
+		return
+	}
+
+	mb.mu.Lock()
+	mb.messages = msgs
+	mb.mu.Unlock()
+
+	mb.app.QueueUpdateDraw(func() {
+		mb.populateTable()
+		mb.updateNavBar()
+	})
+}
+
+func (mb *MessageBrowser) fetchPageReverse(ctx context.Context, provider nats.Provider, endSeq uint64) {
+	var msgs []*nats.RawMessage
+	var totalBytes int
+	skipped := 0
+
+	mb.mu.Lock()
+	firstSeq := mb.firstSeq
+	mb.mu.Unlock()
+
+	for seq := endSeq; seq >= firstSeq && seq > 0; seq-- {
+		if atomic.LoadInt32(&mb.stopped) == 1 {
+			return
+		}
+
+		msg, err := provider.GetMessage(ctx, mb.streamName, seq)
+		if err != nil {
+			skipped++
+			if skipped > 500 {
+				break
+			}
+			continue
+		}
+		totalBytes += len(msg.Data)
+		msgs = append(msgs, msg)
+		if totalBytes >= browserPageBytes || len(msgs) >= browserPageMsgs {
+			break
+		}
+	}
+
+	// Reverse so messages are in ascending sequence order.
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
 	}
 
 	if atomic.LoadInt32(&mb.stopped) == 1 {

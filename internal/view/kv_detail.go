@@ -29,8 +29,8 @@ type KVDetail struct {
 	kv      jetstream.KeyValue
 	binding *binding.TableBinding[string]
 
-	stopRefresh chan struct{}
-	stopped     int32
+	refreshCancel context.CancelFunc
+	stopped       int32
 }
 
 // NewKVDetail creates the KV key browser view.
@@ -38,7 +38,7 @@ func NewKVDetail(app *App, bucket string) *KVDetail {
 	kd := &KVDetail{
 		app:         app,
 		bucket:      bucket,
-		stopRefresh: make(chan struct{}, 1),
+		refreshCancel: func() {},
 	}
 
 	kd.keyTable = components.NewTable().SetHeaders("KEY").
@@ -89,16 +89,15 @@ func (kd *KVDetail) Name() string { return kd.bucket }
 
 func (kd *KVDetail) Start() {
 	atomic.StoreInt32(&kd.stopped, 0)
-	kd.stopRefresh = make(chan struct{}, 1)
+	kd.refreshCancel()
+	_, cancel := context.WithCancel(context.Background())
+	kd.refreshCancel = cancel
 	go kd.initBucket()
 }
 
 func (kd *KVDetail) Stop() {
 	atomic.StoreInt32(&kd.stopped, 1)
-	select {
-	case kd.stopRefresh <- struct{}{}:
-	default:
-	}
+	kd.refreshCancel()
 }
 
 func (kd *KVDetail) Hints() []components.KeyHint {

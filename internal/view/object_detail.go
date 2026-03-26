@@ -28,8 +28,8 @@ type ObjectDetail struct {
 	store   jetstream.ObjectStore
 	binding *binding.TableBinding[*jetstream.ObjectInfo]
 
-	stopRefresh chan struct{}
-	stopped     int32
+	refreshCancel context.CancelFunc
+	stopped       int32
 }
 
 // NewObjectDetail creates the object browser view.
@@ -37,7 +37,7 @@ func NewObjectDetail(app *App, bucket string) *ObjectDetail {
 	od := &ObjectDetail{
 		app:         app,
 		bucket:      bucket,
-		stopRefresh: make(chan struct{}, 1),
+		refreshCancel: func() {},
 	}
 
 	t := theme.Get()
@@ -102,16 +102,15 @@ func (od *ObjectDetail) Name() string { return od.bucket }
 
 func (od *ObjectDetail) Start() {
 	atomic.StoreInt32(&od.stopped, 0)
-	od.stopRefresh = make(chan struct{}, 1)
+	od.refreshCancel()
+	_, cancel := context.WithCancel(context.Background())
+	od.refreshCancel = cancel
 	go od.initStore()
 }
 
 func (od *ObjectDetail) Stop() {
 	atomic.StoreInt32(&od.stopped, 1)
-	select {
-	case od.stopRefresh <- struct{}{}:
-	default:
-	}
+	od.refreshCancel()
 }
 
 func (od *ObjectDetail) Hints() []components.KeyHint {

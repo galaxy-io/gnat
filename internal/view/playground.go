@@ -54,8 +54,8 @@ type Playground struct {
 	gen     int64
 	useJS   bool
 
-	stopProcess chan struct{}
-	stopped     int32
+	processCancel context.CancelFunc
+	stopped       int32
 
 	// Focus cycling
 	focusItems []tview.Primitive
@@ -66,7 +66,7 @@ func NewPlayground(app *App) *Playground {
 	pg := &Playground{
 		app:         app,
 		useJS:       true,
-		stopProcess: make(chan struct{}),
+		processCancel: func() {},
 	}
 
 	// Publisher inputs
@@ -174,10 +174,7 @@ func (pg *Playground) Start() {
 
 func (pg *Playground) Stop() {
 	atomic.StoreInt32(&pg.stopped, 1)
-	select {
-	case pg.stopProcess <- struct{}{}:
-	default:
-	}
+	pg.processCancel()
 	pg.doUnsubscribe()
 }
 
@@ -295,7 +292,9 @@ func (pg *Playground) subscribe(subject string) {
 	useJS := pg.useJS
 	pg.mu.Unlock()
 
-	go pg.processMessages(myGen, msgChan, subject)
+	processCtx, processCancel := context.WithCancel(context.Background())
+	pg.processCancel = processCancel
+	go pg.processMessages(processCtx, myGen, msgChan, subject)
 
 	handler := func(msg nats.LiveMessage) {
 		if atomic.LoadInt32(&pg.stopped) == 1 {
@@ -348,7 +347,7 @@ func (pg *Playground) subscribe(subject string) {
 	})
 }
 
-func (pg *Playground) processMessages(myGen int64, msgChan chan nats.LiveMessage, subject string) {
+func (pg *Playground) processMessages(ctx context.Context, myGen int64, msgChan chan nats.LiveMessage, subject string) {
 	var messages []nats.LiveMessage
 	batchDone := false
 
@@ -390,7 +389,7 @@ func (pg *Playground) processMessages(myGen int64, msgChan chan nats.LiveMessage
 
 	for {
 		select {
-		case <-pg.stopProcess:
+		case <-ctx.Done():
 			return
 		case msg, ok := <-msgChan:
 			if !ok {
@@ -430,11 +429,7 @@ func (pg *Playground) doUnsubscribe() {
 	pg.gen++
 	pg.mu.Unlock()
 
-	select {
-	case pg.stopProcess <- struct{}{}:
-	default:
-	}
-	pg.stopProcess = make(chan struct{})
+	pg.processCancel()
 
 	if sub != nil {
 		_ = sub.Unsubscribe()

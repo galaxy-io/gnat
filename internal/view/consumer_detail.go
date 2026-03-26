@@ -27,9 +27,9 @@ type ConsumerDetail struct {
 	configView  *tview.TextView
 	metricsView *tview.TextView
 
-	info        *binding.Value[*jetstream.ConsumerInfo]
-	stopRefresh chan struct{}
-	stopped     int32
+	info          *binding.Value[*jetstream.ConsumerInfo]
+	refreshCancel context.CancelFunc
+	stopped       int32
 
 	// For rate calculation
 	lastDelivered uint64
@@ -50,7 +50,7 @@ func NewConsumerDetail(app *App, streamName, consumerName string) *ConsumerDetai
 		app:          app,
 		streamName:   streamName,
 		consumerName: consumerName,
-		stopRefresh:  make(chan struct{}, 1),
+		refreshCancel: func() {},
 	}
 
 	cd.configView = tview.NewTextView().SetDynamicColors(true)
@@ -91,14 +91,16 @@ func (cd *ConsumerDetail) Name() string { return cd.consumerName }
 
 func (cd *ConsumerDetail) Start() {
 	atomic.StoreInt32(&cd.stopped, 0)
-	cd.stopRefresh = make(chan struct{}, 1)
+	cd.refreshCancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cd.refreshCancel = cancel
 	go func() {
 		cd.loadInfo()
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-cd.stopRefresh:
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				cd.loadInfo()
@@ -109,10 +111,7 @@ func (cd *ConsumerDetail) Start() {
 
 func (cd *ConsumerDetail) Stop() {
 	atomic.StoreInt32(&cd.stopped, 1)
-	select {
-	case cd.stopRefresh <- struct{}{}:
-	default:
-	}
+	cd.refreshCancel()
 }
 
 func (cd *ConsumerDetail) Hints() []components.KeyHint {

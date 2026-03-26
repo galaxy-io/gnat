@@ -170,18 +170,23 @@ type Dashboard struct {
 	metrics    *binding.Value[metricsSnapshot]
 	advisories *binding.Value[[]nats.Advisory]
 
+	// Advisory buffering — incoming advisories accumulate here and are
+	// flushed to the binding on the poll interval, not per-message.
+	advMu  sync.Mutex
+	advBuf []nats.Advisory
+
 	// Data collection
 	collector *metricsCollector
 
-	stopRefresh chan struct{}
-	stopped     int32
+	refreshCancel context.CancelFunc
+	stopped       int32
 }
 
 // NewDashboard creates the dashboard view.
 func NewDashboard(app *App) *Dashboard {
 	d := &Dashboard{
 		app:         app,
-		stopRefresh: make(chan struct{}, 1),
+		refreshCancel: func() {},
 		collector:   &metricsCollector{},
 	}
 
@@ -360,17 +365,18 @@ func (d *Dashboard) Start() {
 	// Reset lifecycle state so the dashboard works after being re-pushed
 	// (e.g. escaping back from a sub-view calls Stop then Start again).
 	atomic.StoreInt32(&d.stopped, 0)
-	d.stopRefresh = make(chan struct{}, 1)
+	d.refreshCancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	d.refreshCancel = cancel
 
-	d.subscribeAdvisories()
-	go d.pollLoop()
+	go d.pollLoop(ctx)
 }
 
 func (d *Dashboard) Stop() {
 	atomic.StoreInt32(&d.stopped, 1)
-	select {
-	case d.stopRefresh <- struct{}{}:
-	default:
+	d.refreshCancel()
+	if provider := d.app.Provider(); provider != nil {
+		provider.UnsubscribeAdvisories()
 	}
 }
 
@@ -424,9 +430,20 @@ func (d *Dashboard) InputHandler() func(event *tcell.EventKey, setFocus func(p t
 }
 
 // pollLoop runs the 2-second stats ticker and 10-second streams ticker.
-func (d *Dashboard) pollLoop() {
+func (d *Dashboard) pollLoop(ctx context.Context) {
+	// Wait until the tview event loop is running so QueueUpdateDraw
+	// calls are drained immediately instead of piling up in memory.
+	select {
+	case <-d.app.Ready():
+	case <-ctx.Done():
+		return
+	}
+
+	d.subscribeAdvisories()
+
 	// Kick off the first stats and streams fetch concurrently.
 	d.refresh()
+	d.flushAdvisories()
 	go d.refreshStreams()
 
 	statsTicker := time.NewTicker(pollInterval)
@@ -436,10 +453,11 @@ func (d *Dashboard) pollLoop() {
 
 	for {
 		select {
-		case <-d.stopRefresh:
+		case <-ctx.Done():
 			return
 		case <-statsTicker.C:
 			d.refresh()
+			d.flushAdvisories()
 		case <-streamsTicker.C:
 			d.refreshStreams()
 		}
@@ -532,24 +550,32 @@ func (d *Dashboard) refreshStreams() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Clear previous stream data so the chart starts fresh for this iteration.
-	d.metrics.UpdateAndDraw(func(snap metricsSnapshot) metricsSnapshot {
-		snap.streamNames = nil
-		snap.streamMsgs = nil
-		return snap
-	})
-
-	// Stream results incrementally — the bar chart updates after each stream
-	// arrives rather than waiting for the full paginated listing to complete.
-	_ = provider.ListStreamsIter(ctx, func(info *jetstream.StreamInfo) {
+	// Collect stream info then push a single update.
+	// Cap at a reasonable limit so the dashboard bar chart stays usable
+	// and we don't pull the full listing on accounts with thousands of streams.
+	// We use a separate cancellable context so we can abort the SDK paging
+	// once we have enough entries.
+	const maxDashboardStreams = 500
+	iterCtx, iterCancel := context.WithCancel(ctx)
+	defer iterCancel()
+	var names []string
+	var msgs []float64
+	_ = provider.ListStreamsIter(iterCtx, func(info *jetstream.StreamInfo) {
 		if atomic.LoadInt32(&d.stopped) == 1 {
+			iterCancel()
 			return
 		}
-		d.metrics.UpdateAndDraw(func(snap metricsSnapshot) metricsSnapshot {
-			snap.streamNames = append(snap.streamNames, info.Config.Name)
-			snap.streamMsgs = append(snap.streamMsgs, float64(info.State.Msgs))
-			return snap
-		})
+		names = append(names, info.Config.Name)
+		msgs = append(msgs, float64(info.State.Msgs))
+		if len(names) >= maxDashboardStreams {
+			iterCancel()
+		}
+	})
+
+	d.metrics.UpdateAndDraw(func(snap metricsSnapshot) metricsSnapshot {
+		snap.streamNames = names
+		snap.streamMsgs = msgs
+		return snap
 	})
 }
 
@@ -714,13 +740,32 @@ func (d *Dashboard) subscribeAdvisories() {
 		if atomic.LoadInt32(&d.stopped) == 1 {
 			return
 		}
-		d.advisories.UpdateAndDraw(func(advs []nats.Advisory) []nats.Advisory {
-			advs = append(advs, adv)
-			if len(advs) > maxAdvisories {
-				advs = advs[len(advs)-maxAdvisories:]
-			}
-			return advs
-		})
+		d.advMu.Lock()
+		d.advBuf = append(d.advBuf, adv)
+		if len(d.advBuf) > maxAdvisories {
+			d.advBuf = d.advBuf[len(d.advBuf)-maxAdvisories:]
+		}
+		d.advMu.Unlock()
+	})
+}
+
+// flushAdvisories drains the advisory buffer into the binding.
+func (d *Dashboard) flushAdvisories() {
+	d.advMu.Lock()
+	pending := d.advBuf
+	d.advBuf = nil
+	d.advMu.Unlock()
+
+	if len(pending) == 0 {
+		return
+	}
+
+	d.advisories.UpdateAndDraw(func(advs []nats.Advisory) []nats.Advisory {
+		advs = append(advs, pending...)
+		if len(advs) > maxAdvisories {
+			advs = advs[len(advs)-maxAdvisories:]
+		}
+		return advs
 	})
 }
 
