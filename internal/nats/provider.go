@@ -44,6 +44,9 @@ type Provider interface {
 	ServerURL() string
 	Reconnect(ctx context.Context, cfg config.ConnectionConfig) error
 
+	// JetStream availability
+	JetStreamEnabled(ctx context.Context) bool
+
 	// Account
 	AccountInfo(ctx context.Context) (*jetstream.AccountInfo, error)
 

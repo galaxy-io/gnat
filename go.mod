@@ -3,7 +3,7 @@ module github.com/galaxy-io/gnat
 go 1.24.0
 
 require (
-	github.com/atterpac/jig v0.1.4
+	github.com/atterpac/jig v0.1.7
 	github.com/gdamore/tcell/v2 v2.13.4
 	github.com/nats-io/nats.go v1.39.1
 	github.com/rivo/tview v0.42.0

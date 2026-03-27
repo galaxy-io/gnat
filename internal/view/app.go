@@ -21,6 +21,7 @@ import (
 	"github.com/galaxy-io/gnat/internal/clipboard"
 	"github.com/galaxy-io/gnat/internal/command"
 	"github.com/galaxy-io/gnat/internal/config"
+	"github.com/galaxy-io/gnat/internal/logger"
 	"github.com/galaxy-io/gnat/internal/nats"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -60,9 +61,11 @@ func NewApp(provider nats.Provider, cfg *config.Config, activeProfileName string
 		stopMetrics:   make(chan struct{}),
 		ready:         make(chan struct{}),
 	}
+	logger.Debugf("building app UI")
 	a.buildApp()
 	a.setup()
 	a.startMetricsRefresh()
+	logger.Debugf("app initialized")
 	return a
 }
 
@@ -207,10 +210,12 @@ func (a *App) Run() error {
 			select {
 			case <-a.ready:
 			default:
+				logger.Debugf("event loop ready")
 				close(a.ready)
 			}
 		})
 	}()
+	logger.Debugf("starting tview event loop")
 	return a.app.Run()
 }
 
@@ -226,6 +231,7 @@ func (a *App) Provider() nats.Provider {
 	return a.provider
 }
 
+
 // QueueUpdateDraw queues a UI update and redraw (thread-safe).
 func (a *App) QueueUpdateDraw(fn func()) {
 	a.app.QueueUpdateDraw(fn)
@@ -234,6 +240,7 @@ func (a *App) QueueUpdateDraw(fn func()) {
 // Navigation methods
 
 func (a *App) NavigateToDashboard() {
+	logger.Debugf("navigating to dashboard")
 	view := NewDashboard(a)
 	a.app.Pages().Push(view)
 }
@@ -343,6 +350,7 @@ func (a *App) ShowSuccess(msg string) {
 
 // ShowError shows an error toast notification.
 func (a *App) ShowError(msg string) {
+	logger.Debugf("error: %s", msg)
 	a.toasts.Error(msg)
 }
 
@@ -994,6 +1002,9 @@ func formatJSONPretty(s string) string {
 // Close releases background resources. Call after Run() returns.
 func (a *App) Close() {
 	close(a.stopMetrics)
+	if p := a.Provider(); p != nil {
+		p.Close()
+	}
 }
 
 func (a *App) startMetricsRefresh() {
@@ -1022,6 +1033,11 @@ func (a *App) startMetricsRefresh() {
 func (a *App) refreshMetrics() {
 	provider := a.Provider()
 	if provider == nil {
+		logger.Debugf("refreshMetrics: provider is nil")
+		return
+	}
+
+	if !provider.JetStreamEnabled(context.Background()) {
 		return
 	}
 
@@ -1030,8 +1046,10 @@ func (a *App) refreshMetrics() {
 
 	info, err := provider.AccountInfo(ctx)
 	if err != nil {
+		logger.Debugf("refreshMetrics: AccountInfo error: %v", err)
 		return
 	}
+	logger.Debugf("refreshMetrics: memory=%d store=%d streams=%d", info.Memory, info.Store, info.Streams)
 
 	a.QueueUpdateDraw(func() {
 		a.statusBar.SetRightSections([]layout.StatusSection{

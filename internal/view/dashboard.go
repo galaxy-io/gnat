@@ -12,6 +12,7 @@ import (
 	"sort"
 
 	"github.com/galaxy-io/gnat/internal/clipboard"
+	"github.com/galaxy-io/gnat/internal/logger"
 	"github.com/galaxy-io/gnat/internal/nats"
 	"github.com/atterpac/jig/binding"
 	"github.com/atterpac/jig/components"
@@ -69,6 +70,9 @@ type metricsSnapshot struct {
 
 	// RTT history
 	rttHistory []float64
+
+	// JetStream availability
+	jsAvailable bool
 
 	// Account info
 	memoryUsed  uint64
@@ -362,6 +366,7 @@ func (d *Dashboard) CommandContext() CommandViewContext { return CommandViewCont
 func (d *Dashboard) Name() string { return "Dashboard" }
 
 func (d *Dashboard) Start() {
+	logger.Debugf("dashboard: Start")
 	// Reset lifecycle state so the dashboard works after being re-pushed
 	// (e.g. escaping back from a sub-view calls Stop then Start again).
 	atomic.StoreInt32(&d.stopped, 0)
@@ -373,6 +378,7 @@ func (d *Dashboard) Start() {
 }
 
 func (d *Dashboard) Stop() {
+	logger.Debugf("dashboard: Stop")
 	atomic.StoreInt32(&d.stopped, 1)
 	d.refreshCancel()
 	if provider := d.app.Provider(); provider != nil {
@@ -431,11 +437,14 @@ func (d *Dashboard) InputHandler() func(event *tcell.EventKey, setFocus func(p t
 
 // pollLoop runs the 2-second stats ticker and 10-second streams ticker.
 func (d *Dashboard) pollLoop(ctx context.Context) {
+	logger.Debugf("dashboard: pollLoop waiting for ready")
 	// Wait until the tview event loop is running so QueueUpdateDraw
 	// calls are drained immediately instead of piling up in memory.
 	select {
 	case <-d.app.Ready():
+		logger.Debugf("dashboard: pollLoop ready, starting refresh cycle")
 	case <-ctx.Done():
+		logger.Debugf("dashboard: pollLoop cancelled before ready")
 		return
 	}
 
@@ -481,11 +490,15 @@ func (d *Dashboard) refresh() {
 	// Get server info (cheap — reads cached connection state)
 	srvInfo := provider.ServerInfo()
 
-	// Get account info
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// Get account info (skip when JetStream is not available)
+	jsEnabled := provider.JetStreamEnabled(context.Background())
 
-	info, _ := provider.AccountInfo(ctx)
+	var info *jetstream.AccountInfo
+	if jsEnabled {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		info, _ = provider.AccountInfo(ctx)
+		cancel()
+	}
 
 	if atomic.LoadInt32(&d.stopped) == 1 {
 		return
@@ -511,6 +524,7 @@ func (d *Dashboard) refresh() {
 		bytesOutHistory: bytesOut.snapshot(),
 		rttHistory:     rttHist,
 		server:         srvInfo,
+		jsAvailable:    jsEnabled,
 	}
 
 	if info != nil {
@@ -534,12 +548,17 @@ func (d *Dashboard) refresh() {
 		snap.streamMsgs = prev.streamMsgs
 	}
 
+	logger.Debugf("dashboard refresh: setting snapshot jsAvailable=%v rtt=%d", snap.jsAvailable, len(snap.rttHistory))
 	d.metrics.SetAndDraw(snap)
 }
 
 func (d *Dashboard) refreshStreams() {
 	provider := d.app.Provider()
 	if provider == nil {
+		return
+	}
+
+	if !provider.JetStreamEnabled(context.Background()) {
 		return
 	}
 
@@ -580,6 +599,7 @@ func (d *Dashboard) refreshStreams() {
 }
 
 func (d *Dashboard) renderMetrics(snap metricsSnapshot) {
+	logger.Debugf("dashboard renderMetrics called jsAvailable=%v", snap.jsAvailable)
 	// Row 1: Update metric cards
 	d.cardMsgsIn.
 		SetValue(formatRate(snap.msgsInPerSec)).
@@ -628,47 +648,58 @@ func (d *Dashboard) renderMetrics(snap metricsSnapshot) {
 		},
 	)
 
-	// Row 2 right: Update gauges
-	// Limits of -1 mean unlimited in NATS; treat as no cap.
-	if snap.memoryLimit > 0 {
-		d.memoryGauge.SetValue(float64(snap.memoryUsed) / float64(snap.memoryLimit))
-		d.memoryGauge.SetLabel(fmt.Sprintf("Memory %s / %s", formatBytes(snap.memoryUsed), formatBytes(uint64(snap.memoryLimit))))
-	} else if snap.memoryLimit == -1 {
+	// Row 2 right: Update JetStream gauges and cards
+	if !snap.jsAvailable {
 		d.memoryGauge.SetValue(0)
-		d.memoryGauge.SetLabel(fmt.Sprintf("Memory %s / unlimited", formatBytes(snap.memoryUsed)))
-	} else {
-		d.memoryGauge.SetValue(0)
-		d.memoryGauge.SetLabel(fmt.Sprintf("Memory %s", formatBytes(snap.memoryUsed)))
-	}
-	if snap.storeLimit > 0 {
-		d.storeGauge.SetValue(float64(snap.storeUsed) / float64(snap.storeLimit))
-		d.storeGauge.SetLabel(fmt.Sprintf("Store %s / %s", formatBytes(snap.storeUsed), formatBytes(uint64(snap.storeLimit))))
-	} else if snap.storeLimit == -1 {
+		d.memoryGauge.SetLabel("Memory  -")
 		d.storeGauge.SetValue(0)
-		d.storeGauge.SetLabel(fmt.Sprintf("Store %s / unlimited", formatBytes(snap.storeUsed)))
+		d.storeGauge.SetLabel("Store  -")
+		d.cardStreams.SetValue("-")
+		d.cardConsumers.SetValue("-")
+		d.cardAPI.SetValue("-")
 	} else {
-		d.storeGauge.SetValue(0)
-		d.storeGauge.SetLabel(fmt.Sprintf("Store %s", formatBytes(snap.storeUsed)))
-	}
+		// Limits of -1 mean unlimited in NATS; treat as no cap.
+		if snap.memoryLimit > 0 {
+			d.memoryGauge.SetValue(float64(snap.memoryUsed) / float64(snap.memoryLimit))
+			d.memoryGauge.SetLabel(fmt.Sprintf("Memory %s / %s", formatBytes(snap.memoryUsed), formatBytes(uint64(snap.memoryLimit))))
+		} else if snap.memoryLimit == -1 {
+			d.memoryGauge.SetValue(0)
+			d.memoryGauge.SetLabel(fmt.Sprintf("Memory %s / unlimited", formatBytes(snap.memoryUsed)))
+		} else {
+			d.memoryGauge.SetValue(0)
+			d.memoryGauge.SetLabel(fmt.Sprintf("Memory %s", formatBytes(snap.memoryUsed)))
+		}
+		if snap.storeLimit > 0 {
+			d.storeGauge.SetValue(float64(snap.storeUsed) / float64(snap.storeLimit))
+			d.storeGauge.SetLabel(fmt.Sprintf("Store %s / %s", formatBytes(snap.storeUsed), formatBytes(uint64(snap.storeLimit))))
+		} else if snap.storeLimit == -1 {
+			d.storeGauge.SetValue(0)
+			d.storeGauge.SetLabel(fmt.Sprintf("Store %s / unlimited", formatBytes(snap.storeUsed)))
+		} else {
+			d.storeGauge.SetValue(0)
+			d.storeGauge.SetLabel(fmt.Sprintf("Store %s", formatBytes(snap.storeUsed)))
+		}
 
-	// Row 2 right: Update compact cards
-	if snap.maxStreams > 0 {
-		d.cardStreams.SetValue(fmt.Sprintf("%d / %d", snap.streams, snap.maxStreams))
-	} else {
-		d.cardStreams.SetValue(fmt.Sprintf("%d", snap.streams))
+		if snap.maxStreams > 0 {
+			d.cardStreams.SetValue(fmt.Sprintf("%d / %d", snap.streams, snap.maxStreams))
+		} else {
+			d.cardStreams.SetValue(fmt.Sprintf("%d", snap.streams))
+		}
+		if snap.maxConsumers > 0 {
+			d.cardConsumers.SetValue(fmt.Sprintf("%d / %d", snap.consumers, snap.maxConsumers))
+		} else {
+			d.cardConsumers.SetValue(fmt.Sprintf("%d", snap.consumers))
+		}
+		d.cardAPI.SetValue(fmt.Sprintf("%d / %d err", snap.apiTotal, snap.apiErrors))
 	}
-	if snap.maxConsumers > 0 {
-		d.cardConsumers.SetValue(fmt.Sprintf("%d / %d", snap.consumers, snap.maxConsumers))
-	} else {
-		d.cardConsumers.SetValue(fmt.Sprintf("%d", snap.consumers))
-	}
-	d.cardAPI.SetValue(fmt.Sprintf("%d / %d err", snap.apiTotal, snap.apiErrors))
 
 	// Server info panel
 	d.renderServerInfo(snap)
 
 	// Row 3 left: Update bar chart (sorted by most messages first)
-	if len(snap.streamNames) > 0 {
+	if !snap.jsAvailable {
+		d.streamChart.SetItems(components.BarItem{Label: "JetStream disabled", Value: 0})
+	} else if len(snap.streamNames) > 0 {
 		items := make([]components.BarItem, len(snap.streamNames))
 		for i, name := range snap.streamNames {
 			items[i] = components.BarItem{
@@ -732,6 +763,9 @@ func (d *Dashboard) renderServerInfo(snap metricsSnapshot) {
 func (d *Dashboard) subscribeAdvisories() {
 	provider := d.app.Provider()
 	if provider == nil {
+		return
+	}
+	if !provider.JetStreamEnabled(context.Background()) {
 		return
 	}
 
