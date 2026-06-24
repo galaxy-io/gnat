@@ -435,8 +435,8 @@ func (sl *StreamList) bulkDelete() {
 		sl.app.ShowInfo("No streams selected (use Space to select)")
 		return
 	}
-	label := fmt.Sprintf("%d streams", len(keys))
-	ConfirmDelete(sl.app, "bulk", label, func() {
+	msg := fmt.Sprintf("Delete %d selected stream(s)? This cannot be undone.", len(keys))
+	Confirm(sl.app, "Bulk Delete Streams", msg, func() {
 		go func() {
 			for _, name := range keys {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

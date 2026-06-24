@@ -282,9 +282,9 @@ func (cl *ConsumerList) bulkDelete() {
 		cl.app.ShowInfo("No consumers selected (use Space to select)")
 		return
 	}
-	label := fmt.Sprintf("%d consumers", len(keys))
+	msg := fmt.Sprintf("Delete %d selected consumer(s)? This cannot be undone.", len(keys))
 	streamName := cl.streamName
-	ConfirmDelete(cl.app, "bulk", label, func() {
+	Confirm(cl.app, "Bulk Delete Consumers", msg, func() {
 		go func() {
 			for _, name := range keys {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -207,8 +207,8 @@ func (kl *KVList) bulkDelete() {
 		kl.app.ShowInfo("No KV buckets selected (use Space to select)")
 		return
 	}
-	label := fmt.Sprintf("%d KV buckets", len(keys))
-	ConfirmDelete(kl.app, "bulk", label, func() {
+	msg := fmt.Sprintf("Delete %d selected KV bucket(s)? This cannot be undone.", len(keys))
+	Confirm(kl.app, "Bulk Delete KV Buckets", msg, func() {
 		go func() {
 			for _, bucket := range keys {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
