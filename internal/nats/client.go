@@ -22,8 +22,27 @@ type Client struct {
 	js     jetstream.JetStream
 	advSub *natsclient.Subscription
 
-	jsOnce    sync.Once
+	// jsMu guards the JetStream-availability probe cache. It is separate
+	// from mu so probing never blocks (or is blocked by) a Reconnect swap.
+	jsMu      sync.Mutex
+	jsProbed  bool
 	jsEnabled bool
+}
+
+// conn returns the current NATS connection under a read lock, so callers
+// always observe a fully-swapped connection rather than racing with
+// Reconnect mid-swap (which can deadlock on the SDK's internal mutexes).
+func (c *Client) conn() *natsclient.Conn {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.nc
+}
+
+// jetStream returns the current JetStream context under a read lock.
+func (c *Client) jetStream() jetstream.JetStream {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.js
 }
 
 // Connect establishes a NATS connection and creates a JetStream context.
@@ -91,11 +110,11 @@ func (c *Client) Close() {
 }
 
 func (c *Client) IsConnected() bool {
-	return c.nc.IsConnected()
+	return c.conn().IsConnected()
 }
 
 func (c *Client) ConnectionStats() ConnectionStats {
-	s := c.nc.Stats()
+	s := c.conn().Stats()
 	return ConnectionStats{
 		InMsgs:     s.InMsgs,
 		OutMsgs:    s.OutMsgs,
@@ -106,32 +125,33 @@ func (c *Client) ConnectionStats() ConnectionStats {
 }
 
 func (c *Client) RTT() (time.Duration, error) {
-	return c.nc.RTT()
+	return c.conn().RTT()
 }
 
 func (c *Client) ServerURL() string {
-	return c.nc.ConnectedUrl()
+	return c.conn().ConnectedUrl()
 }
 
 func (c *Client) ServerInfo() ServerInfo {
-	rtt, _ := c.nc.RTT()
-	stats := c.nc.Stats()
-	cid, _ := c.nc.GetClientID()
+	nc := c.conn()
+	rtt, _ := nc.RTT()
+	stats := nc.Stats()
+	cid, _ := nc.GetClientID()
 
-	_, tlsErr := c.nc.TLSConnectionState()
+	_, tlsErr := nc.TLSConnectionState()
 	isTLS := tlsErr == nil
 
 	return ServerInfo{
-		Name:       c.nc.ConnectedServerName(),
-		ID:         c.nc.ConnectedServerId(),
-		Version:    c.nc.ConnectedServerVersion(),
-		Cluster:    c.nc.ConnectedClusterName(),
-		Host:       c.nc.ConnectedAddr(),
+		Name:       nc.ConnectedServerName(),
+		ID:         nc.ConnectedServerId(),
+		Version:    nc.ConnectedServerVersion(),
+		Cluster:    nc.ConnectedClusterName(),
+		Host:       nc.ConnectedAddr(),
 		RTT:        rtt,
 		TLS:        isTLS,
-		MaxPayload: c.nc.MaxPayload(),
+		MaxPayload: nc.MaxPayload(),
 		ClientID:   cid,
-		Servers:    c.nc.Servers(),
+		Servers:    nc.Servers(),
 		Reconnects: stats.Reconnects,
 	}
 }
@@ -139,24 +159,43 @@ func (c *Client) ServerInfo() ServerInfo {
 // JetStream availability
 
 func (c *Client) JetStreamEnabled(ctx context.Context) bool {
-	c.jsOnce.Do(func() {
-		_, err := c.js.AccountInfo(ctx)
-		c.jsEnabled = err == nil
-	})
+	c.jsMu.Lock()
+	defer c.jsMu.Unlock()
+	if c.jsProbed {
+		return c.jsEnabled
+	}
+
+	js := c.jetStream()
+	if js == nil {
+		return false
+	}
+
+	// Bound the probe so a hung/unreachable server can't block every
+	// caller indefinitely (callers commonly pass context.Background()).
+	probeCtx := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		probeCtx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
+
+	_, err := js.AccountInfo(probeCtx)
+	c.jsEnabled = err == nil
+	c.jsProbed = true
 	return c.jsEnabled
 }
 
 // Account
 
 func (c *Client) AccountInfo(ctx context.Context) (*jetstream.AccountInfo, error) {
-	return c.js.AccountInfo(ctx)
+	return c.jetStream().AccountInfo(ctx)
 }
 
 // Streams
 
 func (c *Client) ListStreams(ctx context.Context) ([]*jetstream.StreamInfo, error) {
 	var streams []*jetstream.StreamInfo
-	lister := c.js.ListStreams(ctx)
+	lister := c.jetStream().ListStreams(ctx)
 	for info := range lister.Info() {
 		streams = append(streams, info)
 	}
@@ -167,7 +206,7 @@ func (c *Client) ListStreams(ctx context.Context) ([]*jetstream.StreamInfo, erro
 }
 
 func (c *Client) ListStreamsIter(ctx context.Context, fn func(info *jetstream.StreamInfo)) error {
-	lister := c.js.ListStreams(ctx)
+	lister := c.jetStream().ListStreams(ctx)
 	for info := range lister.Info() {
 		fn(info)
 	}
@@ -175,11 +214,11 @@ func (c *Client) ListStreamsIter(ctx context.Context, fn func(info *jetstream.St
 }
 
 func (c *Client) GetStream(ctx context.Context, name string) (jetstream.Stream, error) {
-	return c.js.Stream(ctx, name)
+	return c.jetStream().Stream(ctx, name)
 }
 
 func (c *Client) GetStreamInfo(ctx context.Context, name string) (*jetstream.StreamInfo, error) {
-	stream, err := c.js.Stream(ctx, name)
+	stream, err := c.jetStream().Stream(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -187,19 +226,19 @@ func (c *Client) GetStreamInfo(ctx context.Context, name string) (*jetstream.Str
 }
 
 func (c *Client) CreateStream(ctx context.Context, cfg jetstream.StreamConfig) (jetstream.Stream, error) {
-	return c.js.CreateStream(ctx, cfg)
+	return c.jetStream().CreateStream(ctx, cfg)
 }
 
 func (c *Client) UpdateStream(ctx context.Context, cfg jetstream.StreamConfig) (jetstream.Stream, error) {
-	return c.js.UpdateStream(ctx, cfg)
+	return c.jetStream().UpdateStream(ctx, cfg)
 }
 
 func (c *Client) DeleteStream(ctx context.Context, name string) error {
-	return c.js.DeleteStream(ctx, name)
+	return c.jetStream().DeleteStream(ctx, name)
 }
 
 func (c *Client) StreamNameBySubject(ctx context.Context, subject string) (string, error) {
-	return c.js.StreamNameBySubject(ctx, subject)
+	return c.jetStream().StreamNameBySubject(ctx, subject)
 }
 
 // Stream operations
@@ -222,7 +261,7 @@ func (c *Client) streamSubjectsPaginated(ctx context.Context, streamName string)
 		}
 
 		req := fmt.Sprintf(`{"subjects_filter":">","offset":%d}`, offset)
-		msg, err := c.nc.RequestWithContext(ctx, apiSubject, []byte(req))
+		msg, err := c.conn().RequestWithContext(ctx, apiSubject, []byte(req))
 		if err != nil {
 			if len(all) > 0 {
 				return all, nil // return what we have
@@ -266,7 +305,7 @@ func (c *Client) streamSubjectsPaginated(ctx context.Context, streamName string)
 }
 
 func (c *Client) PurgeStream(ctx context.Context, name string) error {
-	stream, err := c.js.Stream(ctx, name)
+	stream, err := c.jetStream().Stream(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -274,7 +313,7 @@ func (c *Client) PurgeStream(ctx context.Context, name string) error {
 }
 
 func (c *Client) PurgeStreamSubject(ctx context.Context, name, subject string) error {
-	stream, err := c.js.Stream(ctx, name)
+	stream, err := c.jetStream().Stream(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -282,7 +321,7 @@ func (c *Client) PurgeStreamSubject(ctx context.Context, name, subject string) e
 }
 
 func (c *Client) GetMessage(ctx context.Context, streamName string, seq uint64) (*RawMessage, error) {
-	stream, err := c.js.Stream(ctx, streamName)
+	stream, err := c.jetStream().Stream(ctx, streamName)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +333,7 @@ func (c *Client) GetMessage(ctx context.Context, streamName string, seq uint64) 
 }
 
 func (c *Client) GetLastMessageForSubject(ctx context.Context, streamName, subject string) (*RawMessage, error) {
-	stream, err := c.js.Stream(ctx, streamName)
+	stream, err := c.jetStream().Stream(ctx, streamName)
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +359,7 @@ func convertRawMsg(msg *jetstream.RawStreamMsg) *RawMessage {
 }
 
 func (c *Client) GetRecentMessagesForSubject(ctx context.Context, streamName, subject string, maxBytes, maxMsgs int) ([]*RawMessage, error) {
-	stream, err := c.js.Stream(ctx, streamName)
+	stream, err := c.jetStream().Stream(ctx, streamName)
 	if err != nil {
 		return nil, err
 	}
@@ -394,7 +433,7 @@ func (c *Client) GetRecentMessagesForSubject(ctx context.Context, streamName, su
 }
 
 func (c *Client) DeleteMessage(ctx context.Context, streamName string, seq uint64) error {
-	stream, err := c.js.Stream(ctx, streamName)
+	stream, err := c.jetStream().Stream(ctx, streamName)
 	if err != nil {
 		return err
 	}
@@ -404,7 +443,7 @@ func (c *Client) DeleteMessage(ctx context.Context, streamName string, seq uint6
 // Consumers
 
 func (c *Client) ListConsumers(ctx context.Context, streamName string) ([]*jetstream.ConsumerInfo, error) {
-	stream, err := c.js.Stream(ctx, streamName)
+	stream, err := c.jetStream().Stream(ctx, streamName)
 	if err != nil {
 		return nil, err
 	}
@@ -420,7 +459,7 @@ func (c *Client) ListConsumers(ctx context.Context, streamName string) ([]*jetst
 }
 
 func (c *Client) GetConsumer(ctx context.Context, streamName, consumerName string) (jetstream.Consumer, error) {
-	stream, err := c.js.Stream(ctx, streamName)
+	stream, err := c.jetStream().Stream(ctx, streamName)
 	if err != nil {
 		return nil, err
 	}
@@ -428,7 +467,7 @@ func (c *Client) GetConsumer(ctx context.Context, streamName, consumerName strin
 }
 
 func (c *Client) GetConsumerInfo(ctx context.Context, streamName, consumerName string) (*jetstream.ConsumerInfo, error) {
-	stream, err := c.js.Stream(ctx, streamName)
+	stream, err := c.jetStream().Stream(ctx, streamName)
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +479,7 @@ func (c *Client) GetConsumerInfo(ctx context.Context, streamName, consumerName s
 }
 
 func (c *Client) CreateConsumer(ctx context.Context, streamName string, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error) {
-	stream, err := c.js.Stream(ctx, streamName)
+	stream, err := c.jetStream().Stream(ctx, streamName)
 	if err != nil {
 		return nil, err
 	}
@@ -448,7 +487,7 @@ func (c *Client) CreateConsumer(ctx context.Context, streamName string, cfg jets
 }
 
 func (c *Client) UpdateConsumer(ctx context.Context, streamName string, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error) {
-	stream, err := c.js.Stream(ctx, streamName)
+	stream, err := c.jetStream().Stream(ctx, streamName)
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +495,7 @@ func (c *Client) UpdateConsumer(ctx context.Context, streamName string, cfg jets
 }
 
 func (c *Client) DeleteConsumer(ctx context.Context, streamName, consumerName string) error {
-	stream, err := c.js.Stream(ctx, streamName)
+	stream, err := c.jetStream().Stream(ctx, streamName)
 	if err != nil {
 		return err
 	}
@@ -467,7 +506,7 @@ func (c *Client) DeleteConsumer(ctx context.Context, streamName, consumerName st
 
 func (c *Client) ListKeyValueStores(ctx context.Context) ([]jetstream.KeyValueStatus, error) {
 	var stores []jetstream.KeyValueStatus
-	lister := c.js.KeyValueStores(ctx)
+	lister := c.jetStream().KeyValueStores(ctx)
 	for status := range lister.Status() {
 		stores = append(stores, status)
 	}
@@ -478,11 +517,11 @@ func (c *Client) ListKeyValueStores(ctx context.Context) ([]jetstream.KeyValueSt
 }
 
 func (c *Client) GetKeyValue(ctx context.Context, bucket string) (jetstream.KeyValue, error) {
-	return c.js.KeyValue(ctx, bucket)
+	return c.jetStream().KeyValue(ctx, bucket)
 }
 
 func (c *Client) ListKeyValueKeys(ctx context.Context, bucket string) ([]string, error) {
-	kv, err := c.js.KeyValue(ctx, bucket)
+	kv, err := c.jetStream().KeyValue(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -515,18 +554,18 @@ func (c *Client) ListKeyValueKeys(ctx context.Context, bucket string) ([]string,
 }
 
 func (c *Client) CreateKeyValue(ctx context.Context, cfg jetstream.KeyValueConfig) (jetstream.KeyValue, error) {
-	return c.js.CreateKeyValue(ctx, cfg)
+	return c.jetStream().CreateKeyValue(ctx, cfg)
 }
 
 func (c *Client) DeleteKeyValue(ctx context.Context, bucket string) error {
-	return c.js.DeleteKeyValue(ctx, bucket)
+	return c.jetStream().DeleteKeyValue(ctx, bucket)
 }
 
 // Object Store
 
 func (c *Client) ListObjectStores(ctx context.Context) ([]jetstream.ObjectStoreStatus, error) {
 	var stores []jetstream.ObjectStoreStatus
-	lister := c.js.ObjectStores(ctx)
+	lister := c.jetStream().ObjectStores(ctx)
 	for status := range lister.Status() {
 		stores = append(stores, status)
 	}
@@ -537,15 +576,15 @@ func (c *Client) ListObjectStores(ctx context.Context) ([]jetstream.ObjectStoreS
 }
 
 func (c *Client) GetObjectStore(ctx context.Context, bucket string) (jetstream.ObjectStore, error) {
-	return c.js.ObjectStore(ctx, bucket)
+	return c.jetStream().ObjectStore(ctx, bucket)
 }
 
 func (c *Client) CreateObjectStore(ctx context.Context, cfg jetstream.ObjectStoreConfig) (jetstream.ObjectStore, error) {
-	return c.js.CreateObjectStore(ctx, cfg)
+	return c.jetStream().CreateObjectStore(ctx, cfg)
 }
 
 func (c *Client) DeleteObjectStore(ctx context.Context, bucket string) error {
-	return c.js.DeleteObjectStore(ctx, bucket)
+	return c.jetStream().DeleteObjectStore(ctx, bucket)
 }
 
 // Advisories
@@ -558,7 +597,7 @@ func (c *Client) SubscribeAdvisories(ctx context.Context, handler func(Advisory)
 	}
 	c.mu.Unlock()
 
-	sub, err := c.nc.Subscribe("$JS.EVENT.ADVISORY.>", func(msg *natsclient.Msg) {
+	sub, err := c.conn().Subscribe("$JS.EVENT.ADVISORY.>", func(msg *natsclient.Msg) {
 		adv := parseAdvisory(msg)
 		handler(adv)
 	})
@@ -614,18 +653,11 @@ func parseAdvisory(msg *natsclient.Msg) Advisory {
 	return adv
 }
 
-// Reconnect closes the existing connection and connects with new config.
+// Reconnect connects with new config and atomically swaps in the new
+// connection. The (blocking) dial happens WITHOUT holding c.mu so that
+// UI-thread calls into other Client methods are never blocked behind an
+// in-progress reconnect; the lock is only held for the pointer swap.
 func (c *Client) Reconnect(ctx context.Context, cfg config.ConnectionConfig) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Close existing connection
-	if c.advSub != nil {
-		_ = c.advSub.Unsubscribe()
-		c.advSub = nil
-	}
-	c.nc.Close()
-
 	// Build new connection
 	expanded := cfg.ExpandEnv()
 
@@ -676,15 +708,37 @@ func (c *Client) Reconnect(ctx context.Context, cfg config.ConnectionConfig) err
 		return fmt.Errorf("creating JetStream context: %w", err)
 	}
 
+	// Swap in the new connection under the write lock, tearing down the old
+	// one. Readers using conn()/jetStream() see either the fully-old or the
+	// fully-new connection, never a torn state.
+	c.mu.Lock()
+	oldNC := c.nc
+	oldSub := c.advSub
+	c.advSub = nil
 	c.nc = nc
 	c.js = js
-	c.jsOnce = sync.Once{} // reset so JetStreamEnabled re-probes
+	c.mu.Unlock()
+
+	// Reset the JetStream-availability probe so it re-probes the new server.
+	c.jsMu.Lock()
+	c.jsProbed = false
+	c.jsEnabled = false
+	c.jsMu.Unlock()
+
+	// Close the old connection outside the lock — Unsubscribe/Close can block
+	// on the SDK's internal goroutines, which we must not do while holding mu.
+	if oldSub != nil {
+		_ = oldSub.Unsubscribe()
+	}
+	if oldNC != nil {
+		oldNC.Close()
+	}
 	return nil
 }
 
 // WatchKeyValue watches all keys in a KV bucket for changes.
 func (c *Client) WatchKeyValue(ctx context.Context, bucket string, handler func(KVWatchEvent)) (KVWatcher, error) {
-	kv, err := c.js.KeyValue(ctx, bucket)
+	kv, err := c.jetStream().KeyValue(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -758,7 +812,7 @@ func (c *Client) Request(ctx context.Context, subject string, data []byte, heade
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	resp, err := c.nc.RequestMsgWithContext(reqCtx, msg)
+	resp, err := c.conn().RequestMsgWithContext(reqCtx, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -784,12 +838,12 @@ func (c *Client) Publish(_ context.Context, subject string, data []byte, headers
 			msg.Header.Add(k, v)
 		}
 	}
-	return c.nc.PublishMsg(msg)
+	return c.conn().PublishMsg(msg)
 }
 
 // Subscribe creates a subscription to the given subject pattern.
 func (c *Client) Subscribe(ctx context.Context, subject string, handler func(LiveMessage)) (Subscription, error) {
-	sub, err := c.nc.Subscribe(subject, func(msg *natsclient.Msg) {
+	sub, err := c.conn().Subscribe(subject, func(msg *natsclient.Msg) {
 		headers := make(map[string][]string)
 		for k, v := range msg.Header {
 			headers[k] = v
@@ -819,12 +873,12 @@ func (s *clientSubscription) Unsubscribe() error {
 // It automatically finds the stream for the given subject and creates an ephemeral consumer.
 func (c *Client) SubscribeJetStream(ctx context.Context, subject string, policy DeliverPolicy, handler func(LiveMessage)) (Subscription, error) {
 	// Find the stream that handles this subject
-	streamName, err := c.js.StreamNameBySubject(ctx, subject)
+	streamName, err := c.jetStream().StreamNameBySubject(ctx, subject)
 	if err != nil {
 		return nil, fmt.Errorf("no stream found for subject %q: %w", subject, err)
 	}
 
-	stream, err := c.js.Stream(ctx, streamName)
+	stream, err := c.jetStream().Stream(ctx, streamName)
 	if err != nil {
 		return nil, fmt.Errorf("getting stream %s: %w", streamName, err)
 	}
