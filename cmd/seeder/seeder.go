@@ -71,7 +71,7 @@ func main() {
 		}
 		fmt.Printf("\nStarting live publisher (rate: %v)...\n", *liveRate)
 		fmt.Println("Publishing to: orders.*, events.*, logs.*, metrics.*, notify.*, ping, status.*, chat.*")
-		fmt.Println("Press Ctrl+C to stop\n")
+		fmt.Println("Press Ctrl+C to stop")
 		runLivePublisher(nc, js, *liveRate)
 	}
 
@@ -159,16 +159,16 @@ func seedConsumers(ctx context.Context, js jetstream.JetStream) {
 		{
 			stream: "ORDERS",
 			cfg: jetstream.ConsumerConfig{
-				Name:           "order-processor",
-				Durable:        "order-processor",
-				Description:    "Main order processing worker",
-				AckPolicy:      jetstream.AckExplicitPolicy,
-				AckWait:        30 * time.Second,
-				MaxDeliver:     5,
-				MaxAckPending:  1000,
-				FilterSubject:  "orders.created",
-				DeliverPolicy:  jetstream.DeliverAllPolicy,
-				MaxWaiting:     512,
+				Name:          "order-processor",
+				Durable:       "order-processor",
+				Description:   "Main order processing worker",
+				AckPolicy:     jetstream.AckExplicitPolicy,
+				AckWait:       30 * time.Second,
+				MaxDeliver:    5,
+				MaxAckPending: 1000,
+				FilterSubject: "orders.created",
+				DeliverPolicy: jetstream.DeliverAllPolicy,
+				MaxWaiting:    512,
 			},
 		},
 		{
@@ -402,12 +402,12 @@ func simulateConsumption(ctx context.Context, js jetstream.JetStream) {
 	}{
 		{"ORDERS", "order-processor", 120, 0.9},     // moderate lag
 		{"ORDERS", "order-analytics", 30, 0.5},      // high lag — barely consuming
-		{"ORDERS", "order-notifications", 0, 0},      // no consumption — max lag
-		{"EVENTS", "event-handler", 200, 0.85},       // moderate lag
-		{"EVENTS", "event-archiver", 50, 0.3},        // very high lag — slow archiver
-		{"LOGS", "log-indexer", 300, 0.7},             // moderate lag
-		{"LOGS", "log-alerts", 0, 0},                  // zero — watches new only
-		{"METRICS", "metrics-aggregator", 100, 0.4},  // high lag — overwhelmed
+		{"ORDERS", "order-notifications", 0, 0},     // no consumption — max lag
+		{"EVENTS", "event-handler", 200, 0.85},      // moderate lag
+		{"EVENTS", "event-archiver", 50, 0.3},       // very high lag — slow archiver
+		{"LOGS", "log-indexer", 300, 0.7},           // moderate lag
+		{"LOGS", "log-alerts", 0, 0},                // zero — watches new only
+		{"METRICS", "metrics-aggregator", 100, 0.4}, // high lag — overwhelmed
 	}
 
 	for _, c := range consume {
@@ -814,10 +814,10 @@ func runLivePublisher(nc *nats.Conn, js jetstream.JetStream, baseRate time.Durat
 	startTime := time.Now()
 
 	// Throughput control — changes every phaseLen messages
-	phaseLen := 50 + rand.Intn(100)       // messages per phase
-	phaseCount := 0                         // messages in current phase
-	rateMultiplier := 1.0                   // current rate multiplier
-	burstRemaining := 0                     // messages left in a burst (no delay)
+	phaseLen := 50 + rand.Intn(100) // messages per phase
+	phaseCount := 0                 // messages in current phase
+	rateMultiplier := 1.0           // current rate multiplier
+	burstRemaining := 0             // messages left in a burst (no delay)
 
 	// Pick a new traffic phase
 	nextPhase := func() {

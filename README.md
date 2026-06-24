@@ -213,4 +213,4 @@ To report a bug, make a feature request, and more, visit our [issues page](https
 
 - [NATS](https://nats.io) - The messaging system this client connects to
 - [tview](https://github.com/rivo/tview) - Terminal UI library
-- [jig](https://github.com/atterpac/jig) - UI component framework
+- [dado](https://github.com/atterpac/dado) - UI component framework

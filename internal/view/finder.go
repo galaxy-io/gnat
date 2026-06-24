@@ -4,9 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/atterpac/jig/components"
+	"github.com/atterpac/dado/components"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 )
 
 // finderWrapper wraps components.Finder to implement nav.Component for page stack.
@@ -14,23 +13,19 @@ type finderWrapper struct {
 	finder *components.Finder
 }
 
-func (w *finderWrapper) Name() string                    { return "Find" }
-func (w *finderWrapper) Start()                          {}
-func (w *finderWrapper) Stop()                           {}
-func (w *finderWrapper) Hints() []components.KeyHint     { return nil }
-func (w *finderWrapper) Draw(screen tcell.Screen)        { w.finder.Draw(screen) }
-func (w *finderWrapper) GetRect() (int, int, int, int)   { return w.finder.GetRect() }
-func (w *finderWrapper) SetRect(x, y, width, height int) { w.finder.SetRect(x, y, width, height) }
-func (w *finderWrapper) InputHandler() func(*tcell.EventKey, func(tview.Primitive)) {
-	return w.finder.InputHandler()
-}
-func (w *finderWrapper) Focus(delegate func(tview.Primitive))        { w.finder.Focus(delegate) }
-func (w *finderWrapper) Blur()                                       { w.finder.Blur() }
-func (w *finderWrapper) HasFocus() bool                              { return w.finder.HasFocus() }
-func (w *finderWrapper) MouseHandler() func(tview.MouseAction, *tcell.EventMouse, func(tview.Primitive)) (bool, tview.Primitive) {
-	return w.finder.MouseHandler()
-}
-func (w *finderWrapper) PasteHandler() func(string, func(tview.Primitive)) { return nil }
+func (w *finderWrapper) Name() string                         { return "Find" }
+func (w *finderWrapper) Start()                               {}
+func (w *finderWrapper) Stop()                                {}
+func (w *finderWrapper) Hints() []components.KeyHint          { return nil }
+func (w *finderWrapper) Draw(screen tcell.Screen)             { w.finder.Draw(screen) }
+func (w *finderWrapper) Rect() (int, int, int, int)           { return w.finder.Rect() }
+func (w *finderWrapper) GetRect() (int, int, int, int)        { return w.finder.Rect() }
+func (w *finderWrapper) SetRect(x, y, width, height int)      { w.finder.SetRect(x, y, width, height) }
+func (w *finderWrapper) Focus()                               { w.finder.Focus() }
+func (w *finderWrapper) Blur()                                { w.finder.Blur() }
+func (w *finderWrapper) HasFocus() bool                       { return w.finder.HasFocus() }
+func (w *finderWrapper) HandleKey(event *tcell.EventKey) bool { return w.finder.HandleKey(event) }
+func (w *finderWrapper) HandlePaste(text string) bool         { return false }
 
 // showGlobalFinder opens the global fuzzy finder (Ctrl+P).
 func (a *App) showGlobalFinder() {

@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/atterpac/jig/theme"
-	"github.com/atterpac/jig/theme/themes"
-	"github.com/atterpac/jig/util"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
+	"github.com/atterpac/dado/theme/themes"
+	"github.com/atterpac/dado/util"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 
 	"github.com/galaxy-io/gnat/internal/config"
 	"github.com/galaxy-io/gnat/internal/logger"
@@ -150,14 +150,14 @@ func main() {
 }
 
 // connectWithUI shows a splash screen while connecting to NATS.
-// Uses a separate tview.Application that exits once connected.
+// Uses a separate dado core.App that exits once connected.
 func connectWithUI(cfg config.ConnectionConfig) (gnatnats.Provider, error) {
-	app := tview.NewApplication()
+	app := core.NewApp()
 
 	// Logo with gradient
-	logoText := tview.NewTextView().
+	logoText := core.NewTextView().
 		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft)
+		SetTextAlign(core.AlignLeft)
 	logoText.SetBackgroundColor(theme.Bg())
 
 	gradientColors := util.DefaultGradientColors()
@@ -165,28 +165,28 @@ func connectWithUI(cfg config.ConnectionConfig) (gnatnats.Provider, error) {
 	logoText.SetText(gradientLogo)
 
 	// Spacers
-	leftSpacer := tview.NewBox().SetBackgroundColor(theme.Bg())
-	rightSpacer := tview.NewBox().SetBackgroundColor(theme.Bg())
-	topSpacer := tview.NewBox().SetBackgroundColor(theme.Bg())
-	midSpacer := tview.NewBox().SetBackgroundColor(theme.Bg())
-	bottomSpacer := tview.NewBox().SetBackgroundColor(theme.Bg())
+	leftSpacer := core.NewTextView().SetText("")
+	rightSpacer := core.NewTextView().SetText("")
+	topSpacer := core.NewTextView().SetText("")
+	midSpacer := core.NewTextView().SetText("")
+	bottomSpacer := core.NewTextView().SetText("")
 
-	logoContainer := tview.NewFlex().SetDirection(tview.FlexColumn).
+	logoContainer := core.NewFlex().SetDirection(core.Row).
 		AddItem(leftSpacer, 0, 1, false).
 		AddItem(logoText, 56, 0, false).
 		AddItem(rightSpacer, 0, 1, false)
 	logoContainer.SetBackgroundColor(theme.Bg())
 
 	// Status display
-	statusText := tview.NewTextView().
+	statusText := core.NewTextView().
 		SetDynamicColors(true).
-		SetTextAlign(tview.AlignCenter)
+		SetTextAlign(core.AlignCenter)
 	statusText.SetBackgroundColor(theme.Bg())
 
 	// Sponsor line
-	sponsorText := tview.NewTextView().
+	sponsorText := core.NewTextView().
 		SetDynamicColors(true).
-		SetTextAlign(tview.AlignCenter)
+		SetTextAlign(core.AlignCenter)
 	sponsorText.SetBackgroundColor(theme.Bg())
 	sponsorText.SetText(fmt.Sprintf(
 		"[%s]Made with %s by getgalaxy.io[-]",
@@ -194,7 +194,7 @@ func connectWithUI(cfg config.ConnectionConfig) (gnatnats.Provider, error) {
 	))
 
 	// Layout
-	flex := tview.NewFlex().SetDirection(tview.FlexRow).
+	flex := core.NewFlex().SetDirection(core.Column).
 		AddItem(topSpacer, 0, 1, false).
 		AddItem(logoContainer, 11, 0, false).
 		AddItem(statusText, 3, 0, false).
@@ -335,7 +335,7 @@ func connectWithUI(cfg config.ConnectionConfig) (gnatnats.Provider, error) {
 	})
 
 	// Run splash UI
-	app.SetRoot(flex, true)
+	app.SetRoot(flex)
 	logger.Debugf("starting splash event loop")
 	if err := app.Run(); err != nil {
 		return nil, fmt.Errorf("UI error: %w", err)

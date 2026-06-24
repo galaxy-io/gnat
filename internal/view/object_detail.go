@@ -7,13 +7,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/clipboard"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
 	"github.com/gdamore/tcell/v2"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/rivo/tview"
 )
 
 // ObjectDetail is the object browser for an Object Store bucket.
@@ -23,7 +23,7 @@ type ObjectDetail struct {
 	bucket string
 
 	table      *components.Table
-	detailView *tview.TextView
+	detailView *core.TextView
 
 	store   jetstream.ObjectStore
 	binding *binding.TableBinding[*jetstream.ObjectInfo]
@@ -35,8 +35,8 @@ type ObjectDetail struct {
 // NewObjectDetail creates the object browser view.
 func NewObjectDetail(app *App, bucket string) *ObjectDetail {
 	od := &ObjectDetail{
-		app:         app,
-		bucket:      bucket,
+		app:           app,
+		bucket:        bucket,
 		refreshCancel: func() {},
 	}
 
@@ -46,7 +46,7 @@ func NewObjectDetail(app *App, bucket string) *ObjectDetail {
 		SetHeaders("NAME", "SIZE", "CHUNKS", "MODIFIED", "STATUS").
 		ConfigureEmpty(theme.IconFile, "No Objects", "")
 
-	od.detailView = tview.NewTextView().
+	od.detailView = core.NewTextView().
 		SetDynamicColors(true)
 
 	// Set up reactive table binding
@@ -123,47 +123,46 @@ func (od *ObjectDetail) Hints() []components.KeyHint {
 	}
 }
 
-func (od *ObjectDetail) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return od.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch {
-		case event.Rune() == 'd':
-			if obj, ok := od.binding.GetSelectedValue(); ok && obj != nil && od.store != nil {
-				name := obj.Name
-				bucket := od.bucket
-				ConfirmDelete(od.app, "object", name, func() {
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-						defer cancel()
-						if err := od.store.Delete(ctx, name); err != nil {
-							od.app.ShowError(err.Error())
-						} else {
-							od.app.ShowSuccess(fmt.Sprintf("Deleted object: %s from %s", name, bucket))
-							go od.loadObjects()
-						}
-					}()
-				})
-			}
-		case event.Rune() == 'y':
-			if obj, ok := od.binding.GetSelectedValue(); ok && obj != nil {
-				data, err := json.MarshalIndent(obj, "", "  ")
-				if err != nil {
-					od.app.ShowError(err.Error())
-				} else if err := clipboard.Copy(string(data)); err != nil {
-					od.app.ShowError("Clipboard: " + err.Error())
-				} else {
-					od.app.ShowSuccess("Copied object metadata: " + obj.Name)
-				}
-			}
-		case event.Rune() == 'p':
-			od.ToggleDetail()
-		case event.Rune() == 'r':
-			go od.loadObjects()
-		default:
-			if handler := od.MasterDetailView.InputHandler(); handler != nil {
-				handler(event, setFocus)
+func (od *ObjectDetail) HandleKey(event *tcell.EventKey) bool {
+	switch event.Rune() {
+	case 'd':
+		if obj, ok := od.binding.GetSelectedValue(); ok && obj != nil && od.store != nil {
+			name := obj.Name
+			bucket := od.bucket
+			ConfirmDelete(od.app, "object", name, func() {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if err := od.store.Delete(ctx, name); err != nil {
+						od.app.ShowError(err.Error())
+					} else {
+						od.app.ShowSuccess(fmt.Sprintf("Deleted object: %s from %s", name, bucket))
+						go od.loadObjects()
+					}
+				}()
+			})
+		}
+		return true
+	case 'y':
+		if obj, ok := od.binding.GetSelectedValue(); ok && obj != nil {
+			data, err := json.MarshalIndent(obj, "", "  ")
+			if err != nil {
+				od.app.ShowError(err.Error())
+			} else if err := clipboard.Copy(string(data)); err != nil {
+				od.app.ShowError("Clipboard: " + err.Error())
+			} else {
+				od.app.ShowSuccess("Copied object metadata: " + obj.Name)
 			}
 		}
-	})
+		return true
+	case 'p':
+		od.ToggleDetail()
+		return true
+	case 'r':
+		go od.loadObjects()
+		return true
+	}
+	return od.MasterDetailView.HandleKey(event)
 }
 
 func (od *ObjectDetail) initStore() {

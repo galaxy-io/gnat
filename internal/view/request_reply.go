@@ -8,13 +8,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/clipboard"
 	"github.com/galaxy-io/gnat/internal/nats"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 )
 
 type requestEntry struct {
@@ -39,22 +39,22 @@ type RequestReply struct {
 	app *App
 
 	// Left pane: form
-	subjectInput *tview.InputField
-	payloadArea  *tview.TextArea
-	timeoutInput *tview.InputField
-	headerKey    *tview.InputField
-	headerVal    *tview.InputField
-	formFlex     *tview.Flex
+	subjectInput *components.TextField
+	payloadArea  *components.TextArea
+	timeoutInput *components.TextField
+	headerKey    *components.TextField
+	headerVal    *components.TextField
+	formFlex     *core.Flex
 
 	// Right pane: response + history
-	responseView *tview.TextView
+	responseView *core.TextView
 	historyTable *components.Table
-	rightFlex    *tview.Flex
+	rightFlex    *core.Flex
 
 	state *binding.Value[requestReplyState]
 
 	// Focus cycling
-	focusItems []tview.Primitive
+	focusItems []core.Widget
 	focusIdx   int
 }
 
@@ -62,71 +62,55 @@ func NewRequestReply(app *App, subject string) *RequestReply {
 	rr := &RequestReply{app: app}
 
 	// Form inputs
-	rr.subjectInput = tview.NewInputField().
+	rr.subjectInput = components.NewTextField("subject").
 		SetLabel("Subject: ").
-		SetFieldWidth(0).
 		SetPlaceholder("orders.get")
 	rr.subjectInput.SetBackgroundColor(theme.Bg())
-	rr.subjectInput.SetFieldBackgroundColor(theme.Bg())
-	theme.Register(rr.subjectInput)
 	if subject != "" {
-		rr.subjectInput.SetText(subject)
+		rr.subjectInput.SetValue(subject)
 	}
 
-	rr.payloadArea = tview.NewTextArea().
+	rr.payloadArea = components.NewTextArea("payload").
 		SetPlaceholder("request payload...")
 	rr.payloadArea.SetBackgroundColor(theme.Bg())
-	theme.Register(rr.payloadArea)
 
-	rr.timeoutInput = tview.NewInputField().
+	rr.timeoutInput = components.NewTextField("timeout").
 		SetLabel("Timeout: ").
-		SetFieldWidth(0).
 		SetPlaceholder("5s").
-		SetText("5s")
+		SetValue("5s")
 	rr.timeoutInput.SetBackgroundColor(theme.Bg())
-	rr.timeoutInput.SetFieldBackgroundColor(theme.Bg())
-	theme.Register(rr.timeoutInput)
 
-	rr.headerKey = tview.NewInputField().
+	rr.headerKey = components.NewTextField("header_key").
 		SetLabel("Header: ").
-		SetFieldWidth(0).
 		SetPlaceholder("key")
 	rr.headerKey.SetBackgroundColor(theme.Bg())
-	rr.headerKey.SetFieldBackgroundColor(theme.Bg())
-	theme.Register(rr.headerKey)
 
-	rr.headerVal = tview.NewInputField().
+	rr.headerVal = components.NewTextField("header_value").
 		SetLabel("= ").
-		SetFieldWidth(0).
 		SetPlaceholder("value")
 	rr.headerVal.SetBackgroundColor(theme.Bg())
-	rr.headerVal.SetFieldBackgroundColor(theme.Bg())
-	theme.Register(rr.headerVal)
 
-	headerRow := tview.NewFlex().SetDirection(tview.FlexColumn).
+	headerRow := core.NewFlex().SetDirection(core.Row).
 		AddItem(rr.headerKey, 0, 1, false).
 		AddItem(rr.headerVal, 0, 1, false)
 	headerRow.SetBackgroundColor(theme.Bg())
-	theme.Register(headerRow)
 
 	// Left pane layout
-	rr.formFlex = tview.NewFlex().SetDirection(tview.FlexRow).
+	rr.formFlex = core.NewFlex().SetDirection(core.Column).
 		AddItem(rr.subjectInput, 1, 0, true).
 		AddItem(rr.payloadArea, 0, 1, false).
 		AddItem(headerRow, 1, 0, false).
 		AddItem(rr.timeoutInput, 1, 0, false)
 	rr.formFlex.SetBackgroundColor(theme.Bg())
-	theme.Register(rr.formFlex)
 
 	formPanel := components.NewPanel().SetTitle("Request").SetContent(rr.formFlex)
 
 	// Right pane: response view + history table
-	rr.responseView = tview.NewTextView().
+	rr.responseView = core.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
-		SetWrap(true)
+		SetWordWrap(true)
 	rr.responseView.SetBackgroundColor(theme.Bg())
-	theme.Register(rr.responseView)
 	rr.responseView.SetText(fmt.Sprintf("[%s]Send a request with Ctrl+S[-]", theme.TagFgDim()))
 
 	rr.historyTable = components.NewTable().
@@ -137,11 +121,10 @@ func NewRequestReply(app *App, subject string) *RequestReply {
 		rr.showHistoryEntry(row - 1)
 	})
 
-	rr.rightFlex = tview.NewFlex().SetDirection(tview.FlexRow).
+	rr.rightFlex = core.NewFlex().SetDirection(core.Column).
 		AddItem(rr.responseView, 0, 3, false).
 		AddItem(rr.historyTable, 0, 1, false)
 	rr.rightFlex.SetBackgroundColor(theme.Bg())
-	theme.Register(rr.rightFlex)
 
 	responsePanel := components.NewPanel().SetTitle("Response").SetContent(rr.rightFlex)
 
@@ -152,7 +135,7 @@ func NewRequestReply(app *App, subject string) *RequestReply {
 		SetRight(responsePanel)
 
 	// Focus cycling order
-	rr.focusItems = []tview.Primitive{
+	rr.focusItems = []core.Widget{
 		rr.subjectInput, rr.payloadArea, rr.headerKey, rr.headerVal, rr.timeoutInput, rr.historyTable,
 	}
 
@@ -163,10 +146,8 @@ func NewRequestReply(app *App, subject string) *RequestReply {
 	})
 
 	// Enter on subject = send
-	rr.subjectInput.SetDoneFunc(func(key tcell.Key) {
-		if key == tcell.KeyEnter {
-			go rr.sendRequest()
-		}
+	rr.subjectInput.SetOnSubmit(func(_ *components.SubmitEvent) {
+		go rr.sendRequest()
 	})
 
 	return rr
@@ -186,59 +167,57 @@ func (rr *RequestReply) Hints() []components.KeyHint {
 	}
 }
 
-func (rr *RequestReply) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return rr.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch {
-		case event.Key() == tcell.KeyCtrlS:
-			go rr.sendRequest()
-			return
-		case event.Key() == tcell.KeyTab:
-			rr.focusIdx = (rr.focusIdx + 1) % len(rr.focusItems)
-			rr.app.app.SetFocus(rr.focusItems[rr.focusIdx])
-			return
-		case event.Key() == tcell.KeyBacktab:
-			rr.focusIdx--
-			if rr.focusIdx < 0 {
-				rr.focusIdx = len(rr.focusItems) - 1
-			}
-			rr.app.app.SetFocus(rr.focusItems[rr.focusIdx])
-			return
-		case event.Rune() == 'y' && rr.historyTable.HasFocus():
-			s := rr.state.Get()
-			if s.current >= 0 && s.current < len(s.history) {
-				entry := s.history[s.current]
-				if entry.Response != nil {
-					if err := clipboard.Copy(string(entry.Response.Data)); err != nil {
-						rr.app.ShowError("Clipboard: " + err.Error())
-					} else {
-						rr.app.ShowSuccess("Copied response payload")
-					}
+func (rr *RequestReply) HandleKey(event *tcell.EventKey) bool {
+	switch {
+	case event.Key() == tcell.KeyCtrlS:
+		go rr.sendRequest()
+		return true
+	case event.Key() == tcell.KeyTab:
+		rr.focusIdx = (rr.focusIdx + 1) % len(rr.focusItems)
+		rr.app.app.SetFocus(rr.focusItems[rr.focusIdx])
+		return true
+	case event.Key() == tcell.KeyBacktab:
+		rr.focusIdx--
+		if rr.focusIdx < 0 {
+			rr.focusIdx = len(rr.focusItems) - 1
+		}
+		rr.app.app.SetFocus(rr.focusItems[rr.focusIdx])
+		return true
+	case event.Rune() == 'y' && rr.historyTable.HasFocus():
+		s := rr.state.Get()
+		if s.current >= 0 && s.current < len(s.history) {
+			entry := s.history[s.current]
+			if entry.Response != nil {
+				if err := clipboard.Copy(string(entry.Response.Data)); err != nil {
+					rr.app.ShowError("Clipboard: " + err.Error())
+				} else {
+					rr.app.ShowSuccess("Copied response payload")
 				}
 			}
-			return
-		case event.Rune() == 'c' && rr.historyTable.HasFocus():
-			rr.state.SetAndDraw(requestReplyState{current: -1})
-			rr.responseView.SetText(fmt.Sprintf("[%s]Send a request with Ctrl+S[-]", theme.TagFgDim()))
-			return
 		}
+		return true
+	case event.Rune() == 'c' && rr.historyTable.HasFocus():
+		rr.state.SetAndDraw(requestReplyState{current: -1})
+		rr.responseView.SetText(fmt.Sprintf("[%s]Send a request with Ctrl+S[-]", theme.TagFgDim()))
+		return true
+	}
 
-		// Delegate to focused primitive
-		focused := rr.focusItems[rr.focusIdx]
-		if handler := focused.InputHandler(); handler != nil {
-			handler(event, setFocus)
-		}
-	})
+	focused := rr.focusItems[rr.focusIdx]
+	if handler, ok := focused.(core.KeyHandler); ok {
+		return handler.HandleKey(event)
+	}
+	return rr.Split.HandleKey(event)
 }
 
 func (rr *RequestReply) sendRequest() {
-	subject := rr.subjectInput.GetText()
+	subject := rr.subjectInput.GetValue()
 	if subject == "" {
 		rr.app.ShowWarning("Subject is required")
 		return
 	}
 
 	payload := rr.payloadArea.GetText()
-	timeoutStr := rr.timeoutInput.GetText()
+	timeoutStr := rr.timeoutInput.GetValue()
 	if timeoutStr == "" {
 		timeoutStr = "5s"
 	}
@@ -249,8 +228,8 @@ func (rr *RequestReply) sendRequest() {
 	}
 
 	headers := make(map[string][]string)
-	hk := rr.headerKey.GetText()
-	hv := rr.headerVal.GetText()
+	hk := rr.headerKey.GetValue()
+	hv := rr.headerVal.GetValue()
 	if hk != "" {
 		headers[hk] = []string{hv}
 	}
@@ -335,7 +314,7 @@ func (rr *RequestReply) renderResponse(entry requestEntry) {
 	b.WriteString(data)
 
 	rr.responseView.SetText(b.String())
-	rr.responseView.ScrollToBeginning()
+	rr.responseView.ScrollTo(0, 0)
 }
 
 func (rr *RequestReply) renderHistory(s requestReplyState) {

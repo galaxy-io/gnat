@@ -11,15 +11,15 @@ import (
 
 	"sort"
 
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/clipboard"
 	"github.com/galaxy-io/gnat/internal/logger"
 	"github.com/galaxy-io/gnat/internal/nats"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
 	"github.com/gdamore/tcell/v2"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/rivo/tview"
 )
 
 const (
@@ -57,14 +57,14 @@ func (h *rateHistory) snapshot() []float64 {
 // metricsSnapshot holds a point-in-time snapshot of all dashboard data.
 type metricsSnapshot struct {
 	// Rates
-	msgsInPerSec  float64
-	msgsOutPerSec float64
-	bytesInPerSec float64
+	msgsInPerSec   float64
+	msgsOutPerSec  float64
+	bytesInPerSec  float64
 	bytesOutPerSec float64
 
 	// Rate histories (copies for safe binding)
-	msgsInHistory  []float64
-	msgsOutHistory []float64
+	msgsInHistory   []float64
+	msgsOutHistory  []float64
 	bytesInHistory  []float64
 	bytesOutHistory []float64
 
@@ -75,16 +75,16 @@ type metricsSnapshot struct {
 	jsAvailable bool
 
 	// Account info
-	memoryUsed  uint64
-	memoryLimit int64
-	storeUsed   uint64
-	storeLimit  int64
-	streams     int
-	maxStreams  int
-	consumers   int
+	memoryUsed   uint64
+	memoryLimit  int64
+	storeUsed    uint64
+	storeLimit   int64
+	streams      int
+	maxStreams   int
+	consumers    int
 	maxConsumers int
-	apiTotal    uint64
-	apiErrors   uint64
+	apiTotal     uint64
+	apiErrors    uint64
 
 	// Per-stream breakdown
 	streamNames []string
@@ -103,11 +103,11 @@ type metricsCollector struct {
 	prevTime  time.Time
 	hasFirst  bool
 
-	msgsIn  rateHistory
-	msgsOut rateHistory
-	bytesIn rateHistory
+	msgsIn   rateHistory
+	msgsOut  rateHistory
+	bytesIn  rateHistory
 	bytesOut rateHistory
-	rtt     rateHistory
+	rtt      rateHistory
 }
 
 func (mc *metricsCollector) recordStats(stats nats.ConnectionStats) {
@@ -137,13 +137,13 @@ func (mc *metricsCollector) snapshot() (msgsIn, msgsOut, bytesIn, bytesOut rateH
 
 // Dashboard is the top-level overview of the NATS JetStream account.
 type Dashboard struct {
-	*tview.Flex
+	*core.Flex
 	app *App
 
 	// Components - Row 1: Metric cards
-	cardMsgsIn  *components.MetricCard
-	cardMsgsOut *components.MetricCard
-	cardBytesIn *components.MetricCard
+	cardMsgsIn   *components.MetricCard
+	cardMsgsOut  *components.MetricCard
+	cardBytesIn  *components.MetricCard
 	cardBytesOut *components.MetricCard
 
 	// Components - Row 1: RTT card
@@ -160,7 +160,7 @@ type Dashboard struct {
 	cardAPI       *components.MetricCard
 
 	// Components - Row 2 right: Server info
-	serverText  *tview.TextView
+	serverText  *core.TextView
 	serverPanel *components.Panel
 
 	// Components - Row 3 left: Bar chart
@@ -168,7 +168,7 @@ type Dashboard struct {
 
 	// Components - Row 3 right: Advisories
 	advisoryPanel *components.Panel
-	advisoryText  *tview.TextView
+	advisoryText  *core.TextView
 
 	// Reactive state
 	metrics    *binding.Value[metricsSnapshot]
@@ -189,9 +189,9 @@ type Dashboard struct {
 // NewDashboard creates the dashboard view.
 func NewDashboard(app *App) *Dashboard {
 	d := &Dashboard{
-		app:         app,
+		app:           app,
 		refreshCancel: func() {},
-		collector:   &metricsCollector{},
+		collector:     &metricsCollector{},
 	}
 
 	d.buildComponents()
@@ -269,11 +269,10 @@ func (d *Dashboard) buildComponents() {
 		SetShowBorder(false)
 
 	// Server info panel
-	d.serverText = tview.NewTextView().
+	d.serverText = core.NewTextView().
 		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft)
+		SetTextAlign(core.AlignLeft)
 	d.serverText.SetBackgroundColor(theme.Get().Bg())
-	theme.Register(d.serverText)
 
 	d.serverPanel = components.NewPanel().
 		SetTitle("Server").
@@ -288,12 +287,11 @@ func (d *Dashboard) buildComponents() {
 		SetValueFormat("%.0f")
 
 	// Row 3 right: Advisories
-	d.advisoryText = tview.NewTextView().
+	d.advisoryText = core.NewTextView().
 		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft).
+		SetTextAlign(core.AlignLeft).
 		SetScrollable(true)
 	d.advisoryText.SetBackgroundColor(theme.Get().Bg())
-	theme.Register(d.advisoryText)
 
 	d.advisoryPanel = components.NewPanel().
 		SetTitle("Advisories").
@@ -302,7 +300,7 @@ func (d *Dashboard) buildComponents() {
 
 func (d *Dashboard) buildLayout() {
 	// Row 1: 5 metric cards side by side
-	row1 := tview.NewFlex().SetDirection(tview.FlexColumn).
+	row1 := core.NewFlex().SetDirection(core.Row).
 		AddItem(d.cardMsgsIn, 0, 1, false).
 		AddItem(d.cardMsgsOut, 0, 1, false).
 		AddItem(d.cardBytesIn, 0, 1, false).
@@ -310,43 +308,39 @@ func (d *Dashboard) buildLayout() {
 		AddItem(d.cardRTT, 0, 1, false)
 
 	// Row 2 right: server info + JetStream gauges/cards stacked
-	jsPanel := tview.NewFlex().SetDirection(tview.FlexRow).
+	jsPanel := core.NewFlex().SetDirection(core.Column).
 		AddItem(d.memoryGauge, 5, 0, false).
 		AddItem(d.storeGauge, 5, 0, false).
 		AddItem(d.cardStreams, 1, 0, false).
 		AddItem(d.cardConsumers, 1, 0, false).
 		AddItem(d.cardAPI, 1, 0, false)
 	jsPanel.SetBackgroundColor(theme.Get().Bg())
-	theme.Register(jsPanel)
 
 	jsPanelWrapped := components.NewPanel().
 		SetTitle("JetStream").
 		SetContent(jsPanel)
 
-	rightPanel := tview.NewFlex().SetDirection(tview.FlexRow).
+	rightPanel := core.NewFlex().SetDirection(core.Column).
 		AddItem(d.serverPanel, 0, 1, false).
 		AddItem(jsPanelWrapped, 0, 1, false)
 	rightPanel.SetBackgroundColor(theme.Get().Bg())
-	theme.Register(rightPanel)
 
 	// Row 2: graph (left) + server+JetStream (right)
-	row2 := tview.NewFlex().SetDirection(tview.FlexColumn).
+	row2 := core.NewFlex().SetDirection(core.Row).
 		AddItem(d.throughputGraph, 0, 3, false).
-		AddItem(nil, 1, 0, false).
 		AddItem(rightPanel, 0, 1, false)
 
 	// Row 3: bar chart (left) + advisories (right)
-	row3 := tview.NewFlex().SetDirection(tview.FlexColumn).
+	row3 := core.NewFlex().SetDirection(core.Row).
 		AddItem(d.streamChart, 0, 1, false).
 		AddItem(d.advisoryPanel, 0, 1, false)
 
 	// Main layout: three rows stacked vertically
-	d.Flex = tview.NewFlex().SetDirection(tview.FlexRow).
+	d.Flex = core.NewFlex().SetDirection(core.Column).
 		AddItem(row1, 6, 0, false).
 		AddItem(row2, 0, 3, false).
 		AddItem(row3, 0, 2, false)
 	d.Flex.SetBackgroundColor(theme.Get().Bg())
-	theme.Register(d.Flex)
 }
 
 func (d *Dashboard) setupBindings() {
@@ -398,41 +392,46 @@ func (d *Dashboard) Hints() []components.KeyHint {
 	}
 }
 
-func (d *Dashboard) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return d.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch event.Rune() {
-		case 's':
-			d.app.NavigateToStreams()
-		case 'k':
-			d.app.NavigateToKVStores()
-		case 'o':
-			d.app.NavigateToObjectStores()
-		case 'm':
-			d.app.NavigateToMessageMonitor()
-		case 'y':
-			snap := d.metrics.Get()
-			info := map[string]interface{}{
-				"server":  snap.server,
-				"streams": snap.streams,
-				"consumers": snap.consumers,
-				"memory_used": snap.memoryUsed,
-				"store_used":  snap.storeUsed,
-				"api_total":   snap.apiTotal,
-				"api_errors":  snap.apiErrors,
-				"domain":      snap.domain,
-			}
-			data, err := json.MarshalIndent(info, "", "  ")
-			if err != nil {
-				d.app.ShowError(err.Error())
-			} else if err := clipboard.Copy(string(data)); err != nil {
-				d.app.ShowError("Clipboard: " + err.Error())
-			} else {
-				d.app.ShowSuccess("Copied server info")
-			}
-		case 'r':
-			go d.refresh()
+func (d *Dashboard) HandleKey(event *tcell.EventKey) bool {
+	switch event.Rune() {
+	case 's':
+		d.app.NavigateToStreams()
+		return true
+	case 'k':
+		d.app.NavigateToKVStores()
+		return true
+	case 'o':
+		d.app.NavigateToObjectStores()
+		return true
+	case 'm':
+		d.app.NavigateToMessageMonitor()
+		return true
+	case 'y':
+		snap := d.metrics.Get()
+		info := map[string]interface{}{
+			"server":      snap.server,
+			"streams":     snap.streams,
+			"consumers":   snap.consumers,
+			"memory_used": snap.memoryUsed,
+			"store_used":  snap.storeUsed,
+			"api_total":   snap.apiTotal,
+			"api_errors":  snap.apiErrors,
+			"domain":      snap.domain,
 		}
-	})
+		data, err := json.MarshalIndent(info, "", "  ")
+		if err != nil {
+			d.app.ShowError(err.Error())
+		} else if err := clipboard.Copy(string(data)); err != nil {
+			d.app.ShowError("Clipboard: " + err.Error())
+		} else {
+			d.app.ShowSuccess("Copied server info")
+		}
+		return true
+	case 'r':
+		go d.refresh()
+		return true
+	}
+	return d.Flex.HandleKey(event)
 }
 
 // pollLoop runs the 2-second stats ticker and 10-second streams ticker.
@@ -514,17 +513,17 @@ func (d *Dashboard) refresh() {
 	msgsIn, msgsOut, bytesIn, bytesOut := d.collector.snapshot()
 
 	snap := metricsSnapshot{
-		msgsInPerSec:   msgsIn.last(),
-		msgsOutPerSec:  msgsOut.last(),
-		bytesInPerSec:  bytesIn.last(),
-		bytesOutPerSec: bytesOut.last(),
-		msgsInHistory:  msgsIn.snapshot(),
-		msgsOutHistory: msgsOut.snapshot(),
+		msgsInPerSec:    msgsIn.last(),
+		msgsOutPerSec:   msgsOut.last(),
+		bytesInPerSec:   bytesIn.last(),
+		bytesOutPerSec:  bytesOut.last(),
+		msgsInHistory:   msgsIn.snapshot(),
+		msgsOutHistory:  msgsOut.snapshot(),
 		bytesInHistory:  bytesIn.snapshot(),
 		bytesOutHistory: bytesOut.snapshot(),
-		rttHistory:     rttHist,
-		server:         srvInfo,
-		jsAvailable:    jsEnabled,
+		rttHistory:      rttHist,
+		server:          srvInfo,
+		jsAvailable:     jsEnabled,
 	}
 
 	if info != nil {
@@ -834,7 +833,7 @@ func (d *Dashboard) renderAdvisories(advisories []nats.Advisory) {
 	}
 
 	d.advisoryText.SetText(b.String())
-	d.advisoryText.ScrollToBeginning()
+	d.advisoryText.ScrollTo(0, 0)
 }
 
 // --- Formatting helpers ---

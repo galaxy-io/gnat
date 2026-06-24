@@ -3,8 +3,8 @@ package view
 import (
 	"fmt"
 
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/validators"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/validators"
 )
 
 // ConfirmDelete shows a type-to-confirm deletion modal.

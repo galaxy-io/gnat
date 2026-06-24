@@ -6,12 +6,12 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/clipboard"
 	"github.com/galaxy-io/gnat/internal/config"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 	"golang.org/x/term"
 )
 
@@ -56,37 +56,37 @@ OOO
 
 // DebugData holds debug information for display.
 type DebugData struct {
-	Version      string
-	Commit       string
-	BuildDate    string
-	OS           string
-	Arch         string
-	GoVersion    string
-	TerminalCols int
-	TerminalRows int
-	Term         string
-	ColorTerm    string
-	TermProgram  string
-	ColorSpace   string
-	ConfigPath   string
-	ThemeName    string
-	ProfileName  string
+	Version       string
+	Commit        string
+	BuildDate     string
+	OS            string
+	Arch          string
+	GoVersion     string
+	TerminalCols  int
+	TerminalRows  int
+	Term          string
+	ColorTerm     string
+	TermProgram   string
+	ColorSpace    string
+	ConfigPath    string
+	ThemeName     string
+	ProfileName   string
 	ServerAddress string
-	TLSEnabled   bool
-	TLSCertPath  string
-	TLSKeyPath   string
-	TLSCAPath    string
-	Domain       string
-	Credentials  string
+	TLSEnabled    bool
+	TLSCertPath   string
+	TLSKeyPath    string
+	TLSCAPath     string
+	Domain        string
+	Credentials   string
 }
 
 // DebugScreen displays environment and debug information.
 type DebugScreen struct {
-	*tview.Flex
+	*core.Flex
 	panel   *components.Panel
-	content *tview.TextView
-	pons    *tview.TextView
-	inner   *tview.Flex
+	content *core.TextView
+	pons    *core.TextView
+	inner   *core.Flex
 	data    DebugData
 	app     *App
 }
@@ -94,10 +94,10 @@ type DebugScreen struct {
 // NewDebugScreen creates a new debug screen view.
 func NewDebugScreen(app *App, data DebugData) *DebugScreen {
 	ds := &DebugScreen{
-		Flex:    tview.NewFlex().SetDirection(tview.FlexColumn),
-		content: tview.NewTextView(),
-		pons:    tview.NewTextView(),
-		inner:   tview.NewFlex().SetDirection(tview.FlexColumn),
+		Flex:    core.NewFlex().SetDirection(core.Row),
+		content: core.NewTextView(),
+		pons:    core.NewTextView(),
+		inner:   core.NewFlex().SetDirection(core.Row),
 		data:    data,
 		app:     app,
 	}
@@ -118,7 +118,7 @@ func (ds *DebugScreen) setup() {
 	ds.pons.SetDynamicColors(true)
 	ds.pons.SetBackgroundColor(theme.Bg())
 	ds.pons.SetTextColor(theme.Fg())
-	ds.pons.SetTextAlign(tview.AlignLeft)
+	ds.pons.SetTextAlign(core.AlignLeft)
 
 	ds.inner.SetBackgroundColor(theme.Bg())
 	ds.inner.AddItem(ds.content, 0, 1, true)
@@ -315,45 +315,42 @@ func (ds *DebugScreen) Hints() []components.KeyHint {
 	}
 }
 
-// InputHandler returns the input handler for the debug screen.
-func (ds *DebugScreen) InputHandler() func(*tcell.EventKey, func(tview.Primitive)) {
-	return ds.WrapInputHandler(func(event *tcell.EventKey, setFocus func(tview.Primitive)) {
-		switch event.Rune() {
-		case 'y':
-			report := ds.GeneratePlainReport()
-			if err := clipboard.Copy(report); err != nil {
-				ds.app.ShowError("Failed to copy: " + err.Error())
-			} else {
-				ds.app.ShowSuccess("Report copied to clipboard!")
-			}
-		case 'Y':
-			tmpl := ds.GenerateIssueTemplate()
-			if err := clipboard.Copy(tmpl); err != nil {
-				ds.app.ShowError("Failed to copy: " + err.Error())
-			} else {
-				ds.app.ShowSuccess("Issue template copied to clipboard!")
-			}
-		default:
-			if handler := ds.content.InputHandler(); handler != nil {
-				handler(event, setFocus)
-			}
+// HandleKey handles debug screen shortcuts.
+func (ds *DebugScreen) HandleKey(event *tcell.EventKey) bool {
+	switch event.Rune() {
+	case 'y':
+		report := ds.GeneratePlainReport()
+		if err := clipboard.Copy(report); err != nil {
+			ds.app.ShowError("Failed to copy: " + err.Error())
+		} else {
+			ds.app.ShowSuccess("Report copied to clipboard!")
 		}
-	})
+		return true
+	case 'Y':
+		tmpl := ds.GenerateIssueTemplate()
+		if err := clipboard.Copy(tmpl); err != nil {
+			ds.app.ShowError("Failed to copy: " + err.Error())
+		} else {
+			ds.app.ShowSuccess("Issue template copied to clipboard!")
+		}
+		return true
+	}
+	return ds.content.HandleKey(event)
 }
 
 // collectDebugData gathers debug information from the app at call time.
 func collectDebugData(a *App) DebugData {
 	data := DebugData{
-		Version:   Version,
-		OS:        runtime.GOOS,
-		Arch:      runtime.GOARCH,
-		GoVersion: runtime.Version(),
-		Term:      os.Getenv("TERM"),
-		ColorTerm: os.Getenv("COLORTERM"),
+		Version:     Version,
+		OS:          runtime.GOOS,
+		Arch:        runtime.GOARCH,
+		GoVersion:   runtime.Version(),
+		Term:        os.Getenv("TERM"),
+		ColorTerm:   os.Getenv("COLORTERM"),
 		TermProgram: os.Getenv("TERM_PROGRAM"),
 		ColorSpace:  os.Getenv("ITERM_PROFILE"),
-		ConfigPath: config.ConfigPath(),
-		ThemeName:  a.cfg.Theme,
+		ConfigPath:  config.ConfigPath(),
+		ThemeName:   a.cfg.Theme,
 	}
 
 	// Terminal size
