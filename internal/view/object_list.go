@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/clipboard"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
 	"github.com/gdamore/tcell/v2"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/rivo/tview"
 )
 
 // ObjectList displays all Object Store buckets.
@@ -21,7 +21,7 @@ type ObjectList struct {
 	app *App
 
 	table   *components.Table
-	preview *tview.TextView
+	preview *core.TextView
 
 	binding *binding.TableBinding[jetstream.ObjectStoreStatus]
 }
@@ -36,7 +36,7 @@ func NewObjectList(app *App) *ObjectList {
 		SetHeaders("BUCKET", "SIZE", "REPLICAS", "SEALED").
 		ConfigureEmpty(theme.IconFolder, "No Object Stores", "")
 
-	ol.preview = tview.NewTextView().
+	ol.preview = core.NewTextView().
 		SetDynamicColors(true)
 
 	// Set up reactive table binding
@@ -120,59 +120,60 @@ func (ol *ObjectList) Hints() []components.KeyHint {
 	}
 }
 
-func (ol *ObjectList) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return ol.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch {
-		case event.Rune() == 'c':
-			showObjectStoreCreateForm(ol.app, func() {
-				ol.binding.RefreshAsync()
-			})
-		case event.Rune() == 'd':
-			if s, ok := ol.binding.GetSelectedValue(); ok {
-				bucket := s.Bucket()
-				ConfirmDelete(ol.app, "object store", bucket, func() {
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-						defer cancel()
-						if err := ol.app.Provider().DeleteObjectStore(ctx, bucket); err != nil {
-							ol.app.ShowError(err.Error())
-						} else {
-							ol.app.ShowSuccess("Deleted object store: " + bucket)
-							ol.binding.RefreshAsync()
-						}
-					}()
-				})
-			}
-		case event.Rune() == 'D':
-			ol.bulkDelete()
-		case event.Rune() == 'y':
-			if s, ok := ol.binding.GetSelectedValue(); ok {
-				info := map[string]interface{}{
-					"bucket":      s.Bucket(),
-					"description": s.Description(),
-					"size":        s.Size(),
-					"replicas":    s.Replicas(),
-					"sealed":      s.Sealed(),
-				}
-				data, err := json.MarshalIndent(info, "", "  ")
-				if err != nil {
-					ol.app.ShowError(err.Error())
-				} else if err := clipboard.Copy(string(data)); err != nil {
-					ol.app.ShowError("Clipboard: " + err.Error())
-				} else {
-					ol.app.ShowSuccess("Copied object store status: " + s.Bucket())
-				}
-			}
-		case event.Rune() == 'p':
-			ol.ToggleDetail()
-		case event.Rune() == 'r':
+func (ol *ObjectList) HandleKey(event *tcell.EventKey) bool {
+	switch event.Rune() {
+	case 'c':
+		showObjectStoreCreateForm(ol.app, func() {
 			ol.binding.RefreshAsync()
-		default:
-			if handler := ol.MasterDetailView.InputHandler(); handler != nil {
-				handler(event, setFocus)
+		})
+		return true
+	case 'd':
+		if s, ok := ol.binding.GetSelectedValue(); ok {
+			bucket := s.Bucket()
+			ConfirmDelete(ol.app, "object store", bucket, func() {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if err := ol.app.Provider().DeleteObjectStore(ctx, bucket); err != nil {
+						ol.app.ShowError(err.Error())
+					} else {
+						ol.app.ShowSuccess("Deleted object store: " + bucket)
+						ol.binding.RefreshAsync()
+					}
+				}()
+			})
+		}
+		return true
+	case 'D':
+		ol.bulkDelete()
+		return true
+	case 'y':
+		if s, ok := ol.binding.GetSelectedValue(); ok {
+			info := map[string]interface{}{
+				"bucket":      s.Bucket(),
+				"description": s.Description(),
+				"size":        s.Size(),
+				"replicas":    s.Replicas(),
+				"sealed":      s.Sealed(),
+			}
+			data, err := json.MarshalIndent(info, "", "  ")
+			if err != nil {
+				ol.app.ShowError(err.Error())
+			} else if err := clipboard.Copy(string(data)); err != nil {
+				ol.app.ShowError("Clipboard: " + err.Error())
+			} else {
+				ol.app.ShowSuccess("Copied object store status: " + s.Bucket())
 			}
 		}
-	})
+		return true
+	case 'p':
+		ol.ToggleDetail()
+		return true
+	case 'r':
+		ol.binding.RefreshAsync()
+		return true
+	}
+	return ol.MasterDetailView.HandleKey(event)
 }
 
 func (ol *ObjectList) bulkDelete() {

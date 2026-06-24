@@ -7,13 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/clipboard"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
 	"github.com/gdamore/tcell/v2"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/rivo/tview"
 )
 
 // StreamList displays all JetStream streams in a master-detail layout.
@@ -22,7 +22,7 @@ type StreamList struct {
 	app *App
 
 	table   *components.Table
-	preview *tview.TextView
+	preview *core.TextView
 
 	binding *binding.TableBinding[*jetstream.StreamInfo]
 
@@ -47,9 +47,9 @@ func NewStreamList(app *App) *StreamList {
 		SetHeaders("NAME", "MSGS", "BYTES", "CONSUMERS", "STORAGE", "REPLICAS").
 		ConfigureEmpty(theme.IconDatabase, "No Streams", "")
 
-	sl.preview = tview.NewTextView().
+	sl.preview = core.NewTextView().
 		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft)
+		SetTextAlign(core.AlignLeft)
 
 	// Set up reactive table binding
 	sl.binding = binding.NewTableBinding[*jetstream.StreamInfo](sl.table).
@@ -197,86 +197,90 @@ func (sl *StreamList) Hints() []components.KeyHint {
 	}
 }
 
-func (sl *StreamList) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return sl.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch {
-		case event.Key() == tcell.KeyEnter:
-			// Watch messages directly
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				if len(s.Config.Subjects) > 0 {
-					sl.app.NavigateToMessageMonitorWithSubject(s.Config.Subjects[0])
-				}
-			}
-		case event.Rune() == 'v':
-			// View stream detail
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				sl.app.NavigateToStreamDetail(s.Config.Name)
-			}
-		case event.Rune() == 'n':
-			// View consumers
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				sl.app.NavigateToConsumers(s.Config.Name)
-			}
-		case event.Rune() == 'b':
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				sl.app.NavigateToMessageBrowser(s.Config.Name)
-			}
-		case event.Rune() == 'c':
-			showStreamCreateForm(sl.app, func() {
+func (sl *StreamList) HandleKey(event *tcell.EventKey) bool {
+	switch {
+	case event.Key() == tcell.KeyEnter:
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil && len(s.Config.Subjects) > 0 {
+			sl.app.NavigateToMessageMonitorWithSubject(s.Config.Subjects[0])
+		}
+		return true
+	case event.Rune() == 'v':
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			sl.app.NavigateToStreamDetail(s.Config.Name)
+		}
+		return true
+	case event.Rune() == 'n':
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			sl.app.NavigateToConsumers(s.Config.Name)
+		}
+		return true
+	case event.Rune() == 'b':
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			sl.app.NavigateToMessageBrowser(s.Config.Name)
+		}
+		return true
+	case event.Rune() == 'c':
+		showStreamCreateForm(sl.app, func() {
+			sl.binding.RefreshAsync()
+		})
+		return true
+	case event.Rune() == 'd':
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			name := s.Config.Name
+			ConfirmDelete(sl.app, "stream", name, func() {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if err := sl.app.Provider().DeleteStream(ctx, name); err != nil {
+						sl.app.ShowError(err.Error())
+					} else {
+						sl.app.ShowSuccess("Deleted stream: " + name)
+						sl.binding.RefreshAsync()
+					}
+				}()
+			})
+		}
+		return true
+	case event.Rune() == 'e':
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			showStreamEditForm(sl.app, s, func() {
 				sl.binding.RefreshAsync()
 			})
-		case event.Rune() == 'd':
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				name := s.Config.Name
-				ConfirmDelete(sl.app, "stream", name, func() {
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-						defer cancel()
-						if err := sl.app.Provider().DeleteStream(ctx, name); err != nil {
-							sl.app.ShowError(err.Error())
-						} else {
-							sl.app.ShowSuccess("Deleted stream: " + name)
-							sl.binding.RefreshAsync()
-						}
-					}()
-				})
-			}
-		case event.Rune() == 'e':
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				showStreamEditForm(sl.app, s, func() {
-					sl.binding.RefreshAsync()
-				})
-			}
-		case event.Rune() == 'y':
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				data, err := json.MarshalIndent(s.Config, "", "  ")
-				if err != nil {
-					sl.app.ShowError(err.Error())
-				} else if err := clipboard.Copy(string(data)); err != nil {
-					sl.app.ShowError("Clipboard: " + err.Error())
-				} else {
-					sl.app.ShowSuccess("Copied stream config: " + s.Config.Name)
-				}
-			}
-		case event.Rune() == 'D':
-			sl.bulkDelete()
-		case event.Rune() == 'P' && event.Modifiers() == 0:
-			sl.bulkPurge()
-		case event.Rune() == 'p':
-			sl.ToggleDetail()
-		case event.Rune() == 'r':
-			sl.binding.RefreshAsync()
-		case event.Rune() == '/':
-			sl.ShowSearch()
-		default:
-			if sl.HandleSearchKey(event) {
-				return
-			}
-			if handler := sl.MasterDetailView.InputHandler(); handler != nil {
-				handler(event, setFocus)
+		}
+		return true
+	case event.Rune() == 'y':
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			data, err := json.MarshalIndent(s.Config, "", "  ")
+			if err != nil {
+				sl.app.ShowError(err.Error())
+			} else if err := clipboard.Copy(string(data)); err != nil {
+				sl.app.ShowError("Clipboard: " + err.Error())
+			} else {
+				sl.app.ShowSuccess("Copied stream config: " + s.Config.Name)
 			}
 		}
-	})
+		return true
+	case event.Rune() == 'D':
+		sl.bulkDelete()
+		return true
+	case event.Rune() == 'P' && event.Modifiers() == 0:
+		sl.bulkPurge()
+		return true
+	case event.Rune() == 'p':
+		sl.ToggleDetail()
+		return true
+	case event.Rune() == 'r':
+		sl.binding.RefreshAsync()
+		return true
+	case event.Rune() == '/':
+		sl.ShowSearch()
+		return true
+	}
+
+	if sl.HandleSearchKey(event) {
+		return true
+	}
+	return sl.MasterDetailView.HandleKey(event)
 }
 
 func (sl *StreamList) updatePreview(row int) {
@@ -423,7 +427,6 @@ func (sl *StreamList) updatePreview(row int) {
 
 	sl.preview.SetText(b.String())
 }
-
 
 func (sl *StreamList) bulkDelete() {
 	keys := sl.table.GetSelectedKeys()

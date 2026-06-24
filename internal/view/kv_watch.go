@@ -10,13 +10,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/clipboard"
 	"github.com/galaxy-io/gnat/internal/nats"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 )
 
 const maxWatchEntries = 500 // hard cap on retained watch events
@@ -33,7 +33,7 @@ type KVWatch struct {
 	bucket string
 
 	table   *components.Table
-	preview *tview.TextView
+	preview *core.TextView
 
 	state *binding.Value[kvWatchState]
 
@@ -47,8 +47,8 @@ type KVWatch struct {
 // NewKVWatch creates the KV watch view.
 func NewKVWatch(app *App, bucket string) *KVWatch {
 	kw := &KVWatch{
-		app:         app,
-		bucket:      bucket,
+		app:           app,
+		bucket:        bucket,
 		processCancel: func() {},
 	}
 
@@ -56,12 +56,11 @@ func NewKVWatch(app *App, bucket string) *KVWatch {
 		SetHeaders("TIME", "KEY", "OP", "REV", "SIZE").
 		ConfigureEmpty(theme.IconSignal, "Watching...", "Waiting for changes")
 
-	kw.preview = tview.NewTextView().
+	kw.preview = core.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
-		SetWrap(true)
+		SetWordWrap(true)
 	kw.preview.SetBackgroundColor(theme.Bg())
-	theme.Register(kw.preview)
 
 	kw.table.SetSelectionChangedFunc(func(row, col int) {
 		kw.renderPreview(row - 1)
@@ -113,28 +112,26 @@ func (kw *KVWatch) Hints() []components.KeyHint {
 	}
 }
 
-func (kw *KVWatch) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return kw.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch event.Rune() {
-		case 'y':
-			s := kw.state.Get()
-			row, _ := kw.table.GetSelection()
-			idx := row - 1
-			if idx >= 0 && idx < len(s.entries) {
-				actualIdx := len(s.entries) - 1 - idx
-				entry := s.entries[actualIdx]
-				go kw.yankValue(entry)
-			}
-		case 'c':
-			kw.state.SetAndDraw(kvWatchState{})
-		case 'p':
-			kw.ToggleDetail()
-		default:
-			if handler := kw.MasterDetailView.InputHandler(); handler != nil {
-				handler(event, setFocus)
-			}
+func (kw *KVWatch) HandleKey(event *tcell.EventKey) bool {
+	switch event.Rune() {
+	case 'y':
+		s := kw.state.Get()
+		row, _ := kw.table.GetSelection()
+		idx := row - 1
+		if idx >= 0 && idx < len(s.entries) {
+			actualIdx := len(s.entries) - 1 - idx
+			entry := s.entries[actualIdx]
+			go kw.yankValue(entry)
 		}
-	})
+		return true
+	case 'c':
+		kw.state.SetAndDraw(kvWatchState{})
+		return true
+	case 'p':
+		kw.ToggleDetail()
+		return true
+	}
+	return kw.MasterDetailView.HandleKey(event)
 }
 
 func (kw *KVWatch) yankValue(evt nats.KVWatchEvent) {
@@ -319,7 +316,7 @@ func (kw *KVWatch) fetchAndRenderValue(evt nats.KVWatchEvent, header string) {
 	if evt.Operation != "PUT" {
 		kw.app.QueueUpdateDraw(func() {
 			kw.preview.SetText(header + fmt.Sprintf("\n[dim](%s — no value)[-]", evt.Operation))
-			kw.preview.ScrollToBeginning()
+			kw.preview.ScrollTo(0, 0)
 		})
 		return
 	}
@@ -368,6 +365,6 @@ func (kw *KVWatch) fetchAndRenderValue(evt nats.KVWatchEvent, header string) {
 	text := vb.String()
 	kw.app.QueueUpdateDraw(func() {
 		kw.preview.SetText(text)
-		kw.preview.ScrollToBeginning()
+		kw.preview.ScrollTo(0, 0)
 	})
 }

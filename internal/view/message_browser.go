@@ -10,18 +10,18 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/clipboard"
 	"github.com/galaxy-io/gnat/internal/nats"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 )
 
-const browserPageBytes = 8 * 1024 * 1024  // 8 MB byte budget per page
-const browserPageMsgs  = 50               // hard cap on messages per page
-const previewMaxBytes  = 1 * 1024 * 1024  // 1 MB byte budget for preview fetches
-const previewMaxMsgs   = 5                // hard cap on preview messages
+const browserPageBytes = 8 * 1024 * 1024 // 8 MB byte budget per page
+const browserPageMsgs = 50               // hard cap on messages per page
+const previewMaxBytes = 1 * 1024 * 1024  // 1 MB byte budget for preview fetches
+const previewMaxMsgs = 5                 // hard cap on preview messages
 
 type MessageBrowser struct {
 	*components.MasterDetailView
@@ -29,11 +29,11 @@ type MessageBrowser struct {
 	streamName string
 
 	table   *components.Table
-	preview *tview.TextView
-	navBar  *tview.TextView
+	preview *core.TextView
+	navBar  *core.TextView
 
-	mu       sync.Mutex
-	messages []*nats.RawMessage
+	mu        sync.Mutex
+	messages  []*nats.RawMessage
 	totalMsgs uint64
 	firstSeq  uint64
 	lastSeq   uint64
@@ -55,28 +55,25 @@ func NewMessageBrowser(app *App, streamName string) *MessageBrowser {
 		SetHeaders("SEQ", "SUBJECT", "TIME", "SIZE").
 		ConfigureEmpty(theme.IconList, "No Messages", "")
 
-	mb.preview = tview.NewTextView().
+	mb.preview = core.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
-		SetWrap(true)
+		SetWordWrap(true)
 	mb.preview.SetBackgroundColor(theme.Bg())
-	theme.Register(mb.preview)
 
-	mb.navBar = tview.NewTextView().
+	mb.navBar = core.NewTextView().
 		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft)
+		SetTextAlign(core.AlignLeft)
 	mb.navBar.SetBackgroundColor(theme.Bg())
-	theme.Register(mb.navBar)
 
 	mb.table.SetSelectionChangedFunc(func(row, col int) {
 		mb.renderPreview(row)
 	})
 
-	masterContent := tview.NewFlex().SetDirection(tview.FlexRow).
+	masterContent := core.NewFlex().SetDirection(core.Column).
 		AddItem(mb.navBar, 1, 0, false).
 		AddItem(mb.table, 0, 1, true)
 	masterContent.SetBackgroundColor(theme.Bg())
-	theme.Register(masterContent)
 
 	mb.MasterDetailView = components.NewMasterDetailView().
 		SetMasterTitle(fmt.Sprintf("Browse: %s", streamName)).
@@ -119,97 +116,104 @@ func (mb *MessageBrowser) Hints() []components.KeyHint {
 	}
 }
 
-func (mb *MessageBrowser) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return mb.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		if event.Key() == tcell.KeyEscape {
-			if mb.pipeline != nil {
-				mb.pipeline = nil
-				mb.SetDetailTitle("Message Detail")
-				row, _ := mb.table.GetSelection()
-				mb.renderPreview(row)
-				return
-			}
-			if mb.jsonFilter != "" {
-				mb.jsonFilter = ""
-				mb.SetDetailTitle("Message Detail")
-				row, _ := mb.table.GetSelection()
-				mb.renderPreview(row)
-				return
+func (mb *MessageBrowser) HandleKey(event *tcell.EventKey) bool {
+	if event.Key() == tcell.KeyEscape {
+		if mb.pipeline != nil {
+			mb.pipeline = nil
+			mb.SetDetailTitle("Message Detail")
+			row, _ := mb.table.GetSelection()
+			mb.renderPreview(row)
+			return true
+		}
+		if mb.jsonFilter != "" {
+			mb.jsonFilter = ""
+			mb.SetDetailTitle("Message Detail")
+			row, _ := mb.table.GetSelection()
+			mb.renderPreview(row)
+			return true
+		}
+	}
+
+	switch event.Rune() {
+	case 'f':
+		mb.showJSONFilterInput()
+		return true
+	case 'F':
+		mb.showPipelineInput()
+		return true
+	case 'G':
+		go mb.loadInitial()
+		return true
+	case '0':
+		go mb.loadFromSeq(mb.firstSeq)
+		return true
+	case 'w':
+		mb.showPublish()
+		return true
+	case 'R':
+		mb.mu.Lock()
+		msgs := mb.messages
+		mb.mu.Unlock()
+		row, _ := mb.table.GetSelection()
+		idx := row - 1
+		if idx >= 0 && idx < len(msgs) {
+			msg := msgs[idx]
+			mb.showRepublishModal(msg)
+		}
+		return true
+	case 'y':
+		mb.mu.Lock()
+		msgs := mb.messages
+		mb.mu.Unlock()
+		row, _ := mb.table.GetSelection()
+		idx := row - 1
+		if idx >= 0 && idx < len(msgs) {
+			msg := msgs[idx]
+			if err := clipboard.Copy(string(msg.Data)); err != nil {
+				mb.app.ShowError("Clipboard: " + err.Error())
+			} else {
+				mb.app.ShowSuccess(fmt.Sprintf("Copied %s", formatBytes(uint64(len(msg.Data)))))
 			}
 		}
-		switch {
-		case event.Rune() == 'f':
-			mb.showJSONFilterInput()
-		case event.Rune() == 'F':
-			mb.showPipelineInput()
-		case event.Rune() == 'G':
-			go mb.loadInitial()
-		case event.Rune() == '0':
-			go mb.loadFromSeq(mb.firstSeq)
-		case event.Rune() == 'w':
-			mb.showPublish()
-		case event.Rune() == 'R':
-			mb.mu.Lock()
-			msgs := mb.messages
-			mb.mu.Unlock()
-			row, _ := mb.table.GetSelection()
-			idx := row - 1
-			if idx >= 0 && idx < len(msgs) {
-				msg := msgs[idx]
-				mb.showRepublishModal(msg)
-			}
-		case event.Rune() == 'y':
-			mb.mu.Lock()
-			msgs := mb.messages
-			mb.mu.Unlock()
-			row, _ := mb.table.GetSelection()
-			idx := row - 1
-			if idx >= 0 && idx < len(msgs) {
-				msg := msgs[idx]
-				if err := clipboard.Copy(string(msg.Data)); err != nil {
-					mb.app.ShowError("Clipboard: " + err.Error())
+		return true
+	case 'x':
+		mb.mu.Lock()
+		msgs := mb.messages
+		mb.mu.Unlock()
+		if len(msgs) > 0 {
+			var lines []string
+			for _, msg := range msgs {
+				entry := map[string]interface{}{
+					"sequence": msg.Sequence,
+					"subject":  msg.Subject,
+					"time":     msg.Time.Format(time.RFC3339),
+					"headers":  msg.Headers,
+				}
+				var payload interface{}
+				if json.Unmarshal(msg.Data, &payload) == nil {
+					entry["payload"] = payload
 				} else {
-					mb.app.ShowSuccess(fmt.Sprintf("Copied %s", formatBytes(uint64(len(msg.Data)))))
+					entry["payload"] = string(msg.Data)
 				}
+				line, _ := json.Marshal(entry)
+				lines = append(lines, string(line))
 			}
-		case event.Rune() == 'x':
-			mb.mu.Lock()
-			msgs := mb.messages
-			mb.mu.Unlock()
-			if len(msgs) > 0 {
-				var lines []string
-				for _, msg := range msgs {
-					entry := map[string]interface{}{
-						"sequence": msg.Sequence,
-						"subject":  msg.Subject,
-						"time":     msg.Time.Format(time.RFC3339),
-						"headers":  msg.Headers,
-					}
-					var payload interface{}
-					if json.Unmarshal(msg.Data, &payload) == nil {
-						entry["payload"] = payload
-					} else {
-						entry["payload"] = string(msg.Data)
-					}
-					line, _ := json.Marshal(entry)
-					lines = append(lines, string(line))
-				}
-				if err := clipboard.Copy(strings.Join(lines, "\n")); err != nil {
-					mb.app.ShowError("Clipboard: " + err.Error())
-				} else {
-					mb.app.ShowSuccess(fmt.Sprintf("Exported %d messages to clipboard", len(msgs)))
-				}
-			}
-		case event.Rune() == 'p':
-			mb.ToggleDetail()
-		case event.Rune() == 'r':
-			go mb.loadInitial()
-		default:
-			if handler := mb.MasterDetailView.InputHandler(); handler != nil {
-				handler(event, setFocus)
+			if err := clipboard.Copy(strings.Join(lines, "\n")); err != nil {
+				mb.app.ShowError("Clipboard: " + err.Error())
+			} else {
+				mb.app.ShowSuccess(fmt.Sprintf("Exported %d messages to clipboard", len(msgs)))
 			}
 		}
-	})
+		return true
+	case 'p':
+		mb.ToggleDetail()
+		return true
+	case 'r':
+		go mb.loadInitial()
+		return true
+	}
+
+	return mb.MasterDetailView.HandleKey(event)
 }
 
 func (mb *MessageBrowser) loadInitial() {
@@ -447,7 +451,7 @@ func (mb *MessageBrowser) renderPreview(row int) {
 			b.WriteString(result)
 
 			mb.preview.SetText(b.String())
-			mb.preview.ScrollToBeginning()
+			mb.preview.ScrollTo(0, 0)
 			return
 		}
 	}
@@ -465,7 +469,7 @@ func (mb *MessageBrowser) renderPreview(row int) {
 			b.WriteString(result)
 
 			mb.preview.SetText(b.String())
-			mb.preview.ScrollToBeginning()
+			mb.preview.ScrollTo(0, 0)
 			return
 		}
 	}
@@ -482,7 +486,7 @@ func (mb *MessageBrowser) renderPreview(row int) {
 	b.WriteString(data)
 
 	mb.preview.SetText(b.String())
-	mb.preview.ScrollToBeginning()
+	mb.preview.ScrollTo(0, 0)
 }
 
 func (mb *MessageBrowser) showJSONFilterInput() {
@@ -490,9 +494,9 @@ func (mb *MessageBrowser) showJSONFilterInput() {
 	mb.app.statusBar.SetCommandPlaceholder(".field.nested")
 	mb.app.statusBar.EnterCommandMode()
 	if mb.jsonFilter != "" {
-		mb.app.statusBar.GetCommandInput().SetText(mb.jsonFilter)
+		mb.app.statusBar.SetCommandText(mb.jsonFilter)
 	}
-	mb.app.app.SetFocus(mb.app.statusBar.GetCommandInput())
+	mb.app.app.SetFocus(mb.app.statusBar)
 
 	mb.app.statusBar.SetOnCommandSubmit(func(text string) {
 		mb.app.statusBar.ExitCommandMode()
@@ -517,9 +521,9 @@ func (mb *MessageBrowser) showPipelineInput() {
 	mb.app.statusBar.SetCommandPlaceholder(".data | select(.status == \"active\") | map(.name)")
 	mb.app.statusBar.EnterCommandMode()
 	if mb.pipeline != nil {
-		mb.app.statusBar.GetCommandInput().SetText(mb.pipeline.String())
+		mb.app.statusBar.SetCommandText(mb.pipeline.String())
 	}
-	mb.app.app.SetFocus(mb.app.statusBar.GetCommandInput())
+	mb.app.app.SetFocus(mb.app.statusBar)
 
 	mb.app.statusBar.SetOnCommandSubmit(func(text string) {
 		mb.app.statusBar.ExitCommandMode()

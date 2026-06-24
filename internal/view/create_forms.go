@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/validators"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/validators"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

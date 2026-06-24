@@ -8,13 +8,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/clipboard"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
 	"github.com/gdamore/tcell/v2"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/rivo/tview"
 )
 
 // StreamDetail shows full configuration and state for a single stream.
@@ -23,9 +23,9 @@ type StreamDetail struct {
 	app        *App
 	streamName string
 
-	configView  *tview.TextView
-	stateView   *tview.TextView
-	clusterView *tview.TextView
+	configView  *core.TextView
+	stateView   *core.TextView
+	clusterView *core.TextView
 
 	info          *binding.Value[*jetstream.StreamInfo]
 	refreshCancel context.CancelFunc
@@ -35,22 +35,19 @@ type StreamDetail struct {
 // NewStreamDetail creates a stream detail view.
 func NewStreamDetail(app *App, name string) *StreamDetail {
 	sd := &StreamDetail{
-		app:         app,
-		streamName:  name,
+		app:           app,
+		streamName:    name,
 		refreshCancel: func() {},
 	}
 
-	sd.configView = tview.NewTextView().SetDynamicColors(true)
+	sd.configView = core.NewTextView().SetDynamicColors(true)
 	sd.configView.SetBackgroundColor(theme.Get().Bg())
-	theme.Register(sd.configView)
 
-	sd.stateView = tview.NewTextView().SetDynamicColors(true)
+	sd.stateView = core.NewTextView().SetDynamicColors(true)
 	sd.stateView.SetBackgroundColor(theme.Get().Bg())
-	theme.Register(sd.stateView)
 
-	sd.clusterView = tview.NewTextView().SetDynamicColors(true)
+	sd.clusterView = core.NewTextView().SetDynamicColors(true)
 	sd.clusterView.SetBackgroundColor(theme.Get().Bg())
-	theme.Register(sd.clusterView)
 
 	// Set up reactive binding for stream info
 	sd.info = binding.NewValue[*jetstream.StreamInfo](nil)
@@ -67,11 +64,10 @@ func NewStreamDetail(app *App, name string) *StreamDetail {
 	statePanel := components.NewPanel().SetTitle("State").SetContent(sd.stateView)
 
 	// Left column with config and cluster panels
-	leftCol := tview.NewFlex().SetDirection(tview.FlexRow).
+	leftCol := core.NewFlex().SetDirection(core.Column).
 		AddItem(configPanel, 0, 2, false).
 		AddItem(clusterPanel, 0, 1, false)
 	leftCol.SetBackgroundColor(theme.Get().Bg())
-	theme.Register(leftCol)
 
 	// Use Split for resizable panes (Ctrl+Arrow to resize)
 	sd.Split = components.NewSplit().
@@ -129,52 +125,58 @@ func (sd *StreamDetail) Hints() []components.KeyHint {
 	}
 }
 
-func (sd *StreamDetail) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return sd.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch event.Rune() {
-		case 'n':
-			sd.app.NavigateToConsumers(sd.streamName)
-		case 'b':
-			sd.app.NavigateToMessageBrowser(sd.streamName)
-		case 's':
-			go sd.showSubjectBreakdown()
-		case 'w':
-			// Watch messages - navigate to monitor with stream's first subject
-			if info := sd.info.Get(); info != nil && len(info.Config.Subjects) > 0 {
-				sd.app.NavigateToMessageMonitorWithSubject(info.Config.Subjects[0])
-			}
-		case 'e':
-			if info := sd.info.Get(); info != nil {
-				showStreamEditForm(sd.app, info, func() {
-					go sd.loadInfo()
-				})
-			}
-		case 'y':
-			if info := sd.info.Get(); info != nil {
-				data, err := json.MarshalIndent(info, "", "  ")
-				if err != nil {
-					sd.app.ShowError(err.Error())
-				} else if err := clipboard.Copy(string(data)); err != nil {
-					sd.app.ShowError("Clipboard: " + err.Error())
-				} else {
-					sd.app.ShowSuccess("Copied stream info: " + sd.streamName)
-				}
-			}
-		case 'x':
-			if info := sd.info.Get(); info != nil {
-				data, err := json.MarshalIndent(info.Config, "", "  ")
-				if err != nil {
-					sd.app.ShowError(err.Error())
-				} else if err := clipboard.Copy(string(data)); err != nil {
-					sd.app.ShowError("Clipboard: " + err.Error())
-				} else {
-					sd.app.ShowSuccess("Exported stream config to clipboard")
-				}
-			}
-		case 'r':
-			go sd.loadInfo()
+func (sd *StreamDetail) HandleKey(event *tcell.EventKey) bool {
+	switch event.Rune() {
+	case 'n':
+		sd.app.NavigateToConsumers(sd.streamName)
+		return true
+	case 'b':
+		sd.app.NavigateToMessageBrowser(sd.streamName)
+		return true
+	case 's':
+		go sd.showSubjectBreakdown()
+		return true
+	case 'w':
+		if info := sd.info.Get(); info != nil && len(info.Config.Subjects) > 0 {
+			sd.app.NavigateToMessageMonitorWithSubject(info.Config.Subjects[0])
 		}
-	})
+		return true
+	case 'e':
+		if info := sd.info.Get(); info != nil {
+			showStreamEditForm(sd.app, info, func() {
+				go sd.loadInfo()
+			})
+		}
+		return true
+	case 'y':
+		if info := sd.info.Get(); info != nil {
+			data, err := json.MarshalIndent(info, "", "  ")
+			if err != nil {
+				sd.app.ShowError(err.Error())
+			} else if err := clipboard.Copy(string(data)); err != nil {
+				sd.app.ShowError("Clipboard: " + err.Error())
+			} else {
+				sd.app.ShowSuccess("Copied stream info: " + sd.streamName)
+			}
+		}
+		return true
+	case 'x':
+		if info := sd.info.Get(); info != nil {
+			data, err := json.MarshalIndent(info.Config, "", "  ")
+			if err != nil {
+				sd.app.ShowError(err.Error())
+			} else if err := clipboard.Copy(string(data)); err != nil {
+				sd.app.ShowError("Clipboard: " + err.Error())
+			} else {
+				sd.app.ShowSuccess("Exported stream config to clipboard")
+			}
+		}
+		return true
+	case 'r':
+		go sd.loadInfo()
+		return true
+	}
+	return sd.Split.HandleKey(event)
 }
 
 func (sd *StreamDetail) loadInfo() {

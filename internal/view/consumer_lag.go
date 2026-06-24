@@ -9,24 +9,24 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 )
 
 type consumerLagEntry struct {
-	StreamName   string
-	ConsumerName string
-	NumPending   uint64
+	StreamName    string
+	ConsumerName  string
+	NumPending    uint64
 	NumAckPending int
-	TotalLag     uint64
-	LagHistory   []float64
-	ProcRate     float64
+	TotalLag      uint64
+	LagHistory    []float64
+	ProcRate      float64
 	LastDelivered uint64
-	LastSample   time.Time
-	Redelivered  int
+	LastSample    time.Time
+	Redelivered   int
 }
 
 type consumerLagState struct {
@@ -40,7 +40,7 @@ type ConsumerLag struct {
 	app *App
 
 	table   *components.Table
-	preview *tview.TextView
+	preview *core.TextView
 
 	state         *binding.Value[consumerLagState]
 	refreshCancel context.CancelFunc
@@ -52,9 +52,9 @@ type ConsumerLag struct {
 
 func NewConsumerLag(app *App) *ConsumerLag {
 	cl := &ConsumerLag{
-		app:         app,
+		app:           app,
 		refreshCancel: func() {},
-		entryMap:    make(map[string]*consumerLagEntry),
+		entryMap:      make(map[string]*consumerLagEntry),
 	}
 
 	cl.table = components.NewTable().
@@ -65,12 +65,11 @@ func NewConsumerLag(app *App) *ConsumerLag {
 		cl.renderPreview(row - 1)
 	})
 
-	cl.preview = tview.NewTextView().
+	cl.preview = core.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
-		SetWrap(true)
+		SetWordWrap(true)
 	cl.preview.SetBackgroundColor(theme.Bg())
-	theme.Register(cl.preview)
 
 	cl.MasterDetailView = components.NewMasterDetailView().
 		SetMasterTitle("Consumer Lag").
@@ -125,34 +124,29 @@ func (cl *ConsumerLag) Hints() []components.KeyHint {
 	}
 }
 
-func (cl *ConsumerLag) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return cl.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch event.Rune() {
-		case 'r':
-			go cl.refreshAll()
-			return
-		case 'p':
-			cl.ToggleDetail()
-			return
+func (cl *ConsumerLag) HandleKey(event *tcell.EventKey) bool {
+	switch event.Rune() {
+	case 'r':
+		go cl.refreshAll()
+		return true
+	case 'p':
+		cl.ToggleDetail()
+		return true
+	case 'v':
+		if entry, ok := cl.getSelectedEntry(); ok {
+			cl.app.NavigateToStreamDetail(entry.StreamName)
 		}
+		return true
+	}
 
-		if event.Key() == tcell.KeyEnter {
-			if entry, ok := cl.getSelectedEntry(); ok {
-				cl.app.NavigateToConsumerDetail(entry.StreamName, entry.ConsumerName)
-			}
-			return
+	if event.Key() == tcell.KeyEnter {
+		if entry, ok := cl.getSelectedEntry(); ok {
+			cl.app.NavigateToConsumerDetail(entry.StreamName, entry.ConsumerName)
 		}
-		if event.Rune() == 'v' {
-			if entry, ok := cl.getSelectedEntry(); ok {
-				cl.app.NavigateToStreamDetail(entry.StreamName)
-			}
-			return
-		}
+		return true
+	}
 
-		if handler := cl.MasterDetailView.InputHandler(); handler != nil {
-			handler(event, setFocus)
-		}
-	})
+	return cl.MasterDetailView.HandleKey(event)
 }
 
 func (cl *ConsumerLag) refreshAll() {
@@ -316,7 +310,7 @@ func (cl *ConsumerLag) renderPreview(idx int) {
 	}
 
 	cl.preview.SetText(b.String())
-	cl.preview.ScrollToBeginning()
+	cl.preview.ScrollTo(0, 0)
 }
 
 func (cl *ConsumerLag) getSelectedEntry() (consumerLagEntry, bool) {

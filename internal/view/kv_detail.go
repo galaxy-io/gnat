@@ -7,14 +7,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
+	"github.com/atterpac/dado/validators"
 	"github.com/galaxy-io/gnat/internal/clipboard"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
-	"github.com/atterpac/jig/validators"
 	"github.com/gdamore/tcell/v2"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/rivo/tview"
 )
 
 // KVDetail is the key browser for a KV bucket.
@@ -24,7 +24,7 @@ type KVDetail struct {
 	bucket string
 
 	keyTable  *components.Table
-	valueView *tview.TextView
+	valueView *core.TextView
 
 	kv      jetstream.KeyValue
 	binding *binding.TableBinding[string]
@@ -36,15 +36,15 @@ type KVDetail struct {
 // NewKVDetail creates the KV key browser view.
 func NewKVDetail(app *App, bucket string) *KVDetail {
 	kd := &KVDetail{
-		app:         app,
-		bucket:      bucket,
+		app:           app,
+		bucket:        bucket,
 		refreshCancel: func() {},
 	}
 
 	kd.keyTable = components.NewTable().SetHeaders("KEY").
 		ConfigureEmpty(theme.IconKey, "No Keys", "")
 
-	kd.valueView = tview.NewTextView().
+	kd.valueView = core.NewTextView().
 		SetDynamicColors(true)
 
 	// Set up reactive table binding for keys
@@ -114,31 +114,34 @@ func (kd *KVDetail) Hints() []components.KeyHint {
 	}
 }
 
-func (kd *KVDetail) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return kd.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch {
-		case event.Rune() == 'y':
-			kd.yankValue()
-		case event.Rune() == 'h':
-			go kd.showHistory()
-		case event.Rune() == 'c':
-			kd.createKey()
-		case event.Rune() == 'e':
-			kd.editKey()
-		case event.Rune() == 'w':
-			kd.app.NavigateToKVWatch(kd.bucket)
-		case event.Rune() == 'd':
-			kd.deleteKey()
-		case event.Rune() == 'p':
-			kd.ToggleDetail()
-		case event.Rune() == 'r':
-			go kd.loadKeys()
-		default:
-			if handler := kd.MasterDetailView.InputHandler(); handler != nil {
-				handler(event, setFocus)
-			}
-		}
-	})
+func (kd *KVDetail) HandleKey(event *tcell.EventKey) bool {
+	switch event.Rune() {
+	case 'y':
+		kd.yankValue()
+		return true
+	case 'h':
+		go kd.showHistory()
+		return true
+	case 'c':
+		kd.createKey()
+		return true
+	case 'e':
+		kd.editKey()
+		return true
+	case 'w':
+		kd.app.NavigateToKVWatch(kd.bucket)
+		return true
+	case 'd':
+		kd.deleteKey()
+		return true
+	case 'p':
+		kd.ToggleDetail()
+		return true
+	case 'r':
+		go kd.loadKeys()
+		return true
+	}
+	return kd.MasterDetailView.HandleKey(event)
 }
 
 func (kd *KVDetail) initBucket() {

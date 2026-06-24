@@ -9,14 +9,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/clipboard"
 	"github.com/galaxy-io/gnat/internal/nats"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
 	"github.com/gdamore/tcell/v2"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/rivo/tview"
 )
 
 // ConsumerList displays all consumers for a given stream.
@@ -26,7 +26,7 @@ type ConsumerList struct {
 	streamName string
 
 	table   *components.Table
-	preview *tview.TextView
+	preview *core.TextView
 
 	binding *binding.TableBinding[*jetstream.ConsumerInfo]
 
@@ -51,7 +51,7 @@ func NewConsumerList(app *App, streamName string) *ConsumerList {
 		SetHeaders("NAME", "TYPE", "PENDING", "ACK_PEND", "REDELIVERED", "WAITING").
 		ConfigureEmpty(theme.IconList, "No Consumers", "")
 
-	cl.preview = tview.NewTextView().
+	cl.preview = core.NewTextView().
 		SetDynamicColors(true)
 
 	t := theme.Get()
@@ -207,69 +207,72 @@ func (cl *ConsumerList) Hints() []components.KeyHint {
 	}
 }
 
-func (cl *ConsumerList) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return cl.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch {
-		case event.Rune() == 'c':
-			showConsumerCreateForm(cl.app, cl.streamName, func() {
+func (cl *ConsumerList) HandleKey(event *tcell.EventKey) bool {
+	switch event.Rune() {
+	case 'c':
+		showConsumerCreateForm(cl.app, cl.streamName, func() {
+			cl.binding.RefreshAsync()
+		})
+		return true
+	case 'd':
+		if c, ok := cl.binding.GetSelectedValue(); ok && c != nil {
+			name := c.Config.Name
+			if name == "" {
+				name = c.Config.Durable
+			}
+			if name == "" {
+				return true
+			}
+			streamName := cl.streamName
+			ConfirmDelete(cl.app, "consumer", name, func() {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if err := cl.app.Provider().DeleteConsumer(ctx, streamName, name); err != nil {
+						cl.app.ShowError(err.Error())
+					} else {
+						cl.app.ShowSuccess("Deleted consumer: " + name)
+						cl.binding.RefreshAsync()
+					}
+				}()
+			})
+		}
+		return true
+	case 'e':
+		if c, ok := cl.binding.GetSelectedValue(); ok && c != nil {
+			showConsumerEditForm(cl.app, cl.streamName, c, func() {
 				cl.binding.RefreshAsync()
 			})
-		case event.Rune() == 'd':
-			if c, ok := cl.binding.GetSelectedValue(); ok && c != nil {
+		}
+		return true
+	case 'D':
+		cl.bulkDelete()
+		return true
+	case 'y':
+		if c, ok := cl.binding.GetSelectedValue(); ok && c != nil {
+			data, err := json.MarshalIndent(c.Config, "", "  ")
+			if err != nil {
+				cl.app.ShowError(err.Error())
+			} else if err := clipboard.Copy(string(data)); err != nil {
+				cl.app.ShowError("Clipboard: " + err.Error())
+			} else {
 				name := c.Config.Name
 				if name == "" {
 					name = c.Config.Durable
 				}
-				if name == "" {
-					return
-				}
-				streamName := cl.streamName
-				ConfirmDelete(cl.app, "consumer", name, func() {
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-						defer cancel()
-						if err := cl.app.Provider().DeleteConsumer(ctx, streamName, name); err != nil {
-							cl.app.ShowError(err.Error())
-						} else {
-							cl.app.ShowSuccess("Deleted consumer: " + name)
-							cl.binding.RefreshAsync()
-						}
-					}()
-				})
-			}
-		case event.Rune() == 'e':
-			if c, ok := cl.binding.GetSelectedValue(); ok && c != nil {
-				showConsumerEditForm(cl.app, cl.streamName, c, func() {
-					cl.binding.RefreshAsync()
-				})
-			}
-		case event.Rune() == 'D':
-			cl.bulkDelete()
-		case event.Rune() == 'y':
-			if c, ok := cl.binding.GetSelectedValue(); ok && c != nil {
-				data, err := json.MarshalIndent(c.Config, "", "  ")
-				if err != nil {
-					cl.app.ShowError(err.Error())
-				} else if err := clipboard.Copy(string(data)); err != nil {
-					cl.app.ShowError("Clipboard: " + err.Error())
-				} else {
-					name := c.Config.Name
-					if name == "" {
-						name = c.Config.Durable
-					}
-					cl.app.ShowSuccess("Copied consumer config: " + name)
-				}
-			}
-		case event.Rune() == 'p':
-			cl.ToggleDetail()
-		case event.Rune() == 'r':
-			cl.binding.RefreshAsync()
-		default:
-			if handler := cl.MasterDetailView.InputHandler(); handler != nil {
-				handler(event, setFocus)
+				cl.app.ShowSuccess("Copied consumer config: " + name)
 			}
 		}
-	})
+		return true
+	case 'p':
+		cl.ToggleDetail()
+		return true
+	case 'r':
+		cl.binding.RefreshAsync()
+		return true
+	}
+
+	return cl.MasterDetailView.HandleKey(event)
 }
 
 func (cl *ConsumerList) bulkDelete() {

@@ -10,12 +10,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/nats"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 )
 
 type subjectNodeData struct {
@@ -36,20 +36,20 @@ type SubjectExplorer struct {
 	app *App
 
 	tree    *components.Tree
-	preview *tview.TextView
+	preview *core.TextView
 
 	state         *binding.Value[subjectExplorerState]
 	refreshCancel context.CancelFunc
 	stopped       int32
 
 	// Recent messages preview
-	previewCancel  context.CancelFunc
-	previewData    *subjectNodeData
+	previewCancel context.CancelFunc
+	previewData   *subjectNodeData
 }
 
 func NewSubjectExplorer(app *App) *SubjectExplorer {
 	se := &SubjectExplorer{
-		app:         app,
+		app:           app,
 		refreshCancel: func() {},
 	}
 
@@ -74,12 +74,11 @@ func NewSubjectExplorer(app *App) *SubjectExplorer {
 		}
 	})
 
-	se.preview = tview.NewTextView().
+	se.preview = core.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
-		SetWrap(true)
+		SetWordWrap(true)
 	se.preview.SetBackgroundColor(theme.Bg())
-	theme.Register(se.preview)
 
 	se.MasterDetailView = components.NewMasterDetailView().
 		SetMasterTitle("Subjects").
@@ -136,39 +135,34 @@ func (se *SubjectExplorer) Hints() []components.KeyHint {
 	}
 }
 
-func (se *SubjectExplorer) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return se.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch event.Rune() {
-		case 'v':
-			if node := se.tree.GetSelected(); node != nil {
-				if data, ok := node.Data.(*subjectNodeData); ok && len(data.Streams) > 0 {
-					se.app.NavigateToStreamDetail(data.Streams[0])
-				}
+func (se *SubjectExplorer) HandleKey(event *tcell.EventKey) bool {
+	switch event.Rune() {
+	case 'v':
+		if node := se.tree.GetSelected(); node != nil {
+			if data, ok := node.Data.(*subjectNodeData); ok && len(data.Streams) > 0 {
+				se.app.NavigateToStreamDetail(data.Streams[0])
 			}
-			return
-		case 'r':
-			go se.refresh()
-			return
-		case 'p':
-			se.ToggleDetail()
-			return
-		case '/':
-			se.showFilter()
-			return
 		}
+		return true
+	case 'r':
+		go se.refresh()
+		return true
+	case 'p':
+		se.ToggleDetail()
+		return true
+	case '/':
+		se.showFilter()
+		return true
+	}
 
-		// Delegate to tree for j/k/h/l/o/O/C/Enter etc.
-		if handler := se.tree.InputHandler(); handler != nil {
-			handler(event, setFocus)
-		}
-	})
+	return se.tree.HandleKey(event)
 }
 
 func (se *SubjectExplorer) showFilter() {
 	se.app.statusBar.SetCommandPrompt("Filter: ")
 	se.app.statusBar.SetCommandPlaceholder("subject pattern...")
 	se.app.statusBar.EnterCommandMode()
-	se.app.app.SetFocus(se.app.statusBar.GetCommandInput())
+	se.app.app.SetFocus(se.app.statusBar)
 
 	se.app.statusBar.SetOnCommandSubmit(func(text string) {
 		se.app.statusBar.ExitCommandMode()
@@ -486,5 +480,5 @@ func (se *SubjectExplorer) renderPreviewText(data *subjectNodeData, msgs []*nats
 	}
 
 	se.preview.SetText(b.String())
-	se.preview.ScrollToBeginning()
+	se.preview.ScrollTo(0, 0)
 }

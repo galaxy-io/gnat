@@ -3,11 +3,11 @@ package view
 import (
 	"fmt"
 
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/config"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 )
 
 // ProfileModal displays a list of connection profiles for selection.
@@ -40,10 +40,9 @@ func NewProfileModal(cfg *config.Config, onSelect func(string), onNew, onClose f
 
 	pm.populateTable(cfg)
 
-	content := tview.NewFlex().SetDirection(tview.FlexRow).
+	content := core.NewFlex().SetDirection(core.Column).
 		AddItem(pm.table, 0, 1, true)
 	content.SetBackgroundColor(theme.Get().Bg())
-	theme.Register(content)
 
 	pm.Modal = components.NewModal(components.ModalConfig{
 		Title:    "Connection Profiles",
@@ -63,9 +62,9 @@ func NewProfileModal(cfg *config.Config, onSelect func(string), onNew, onClose f
 	return pm
 }
 
-func (pm *ProfileModal) Name() string             { return "Profiles" }
-func (pm *ProfileModal) Start()                   {}
-func (pm *ProfileModal) Stop()                    {}
+func (pm *ProfileModal) Name() string { return "Profiles" }
+func (pm *ProfileModal) Start()       {}
+func (pm *ProfileModal) Stop()        {}
 
 func (pm *ProfileModal) populateTable(cfg *config.Config) {
 	pm.table.ClearRows()
@@ -95,53 +94,47 @@ func (pm *ProfileModal) populateTable(cfg *config.Config) {
 	}
 }
 
-func (pm *ProfileModal) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return pm.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch event.Key() {
-		case tcell.KeyEnter:
-			idx := pm.table.SelectedRow()
-			if idx >= 0 && idx < len(pm.profiles) {
-				if pm.onSelect != nil {
-					pm.onSelect(pm.profiles[idx])
-				}
-			}
-			return
-		case tcell.KeyEscape:
-			if pm.onClose != nil {
-				pm.onClose()
-			}
-			return
+func (pm *ProfileModal) HandleKey(event *tcell.EventKey) bool {
+	switch event.Key() {
+	case tcell.KeyEnter:
+		idx := pm.table.SelectedRow()
+		if idx >= 0 && idx < len(pm.profiles) && pm.onSelect != nil {
+			pm.onSelect(pm.profiles[idx])
 		}
+		return true
+	case tcell.KeyEscape:
+		if pm.onClose != nil {
+			pm.onClose()
+		}
+		return true
+	}
 
-		switch event.Rune() {
-		case 'n':
-			if pm.onNew != nil {
-				pm.onNew()
-			}
-		case 'e':
-			idx := pm.table.SelectedRow()
-			if idx >= 0 && idx < len(pm.profiles) {
-				if pm.onEdit != nil {
-					pm.onEdit(pm.profiles[idx])
-				}
-			}
-		case 'd':
-			idx := pm.table.SelectedRow()
-			if idx >= 0 && idx < len(pm.profiles) {
-				if pm.onDelete != nil {
-					pm.onDelete(pm.profiles[idx])
-				}
-			}
-		case 'q':
-			if pm.onClose != nil {
-				pm.onClose()
-			}
-		default:
-			if handler := pm.table.InputHandler(); handler != nil {
-				handler(event, setFocus)
-			}
+	switch event.Rune() {
+	case 'n':
+		if pm.onNew != nil {
+			pm.onNew()
 		}
-	})
+		return true
+	case 'e':
+		idx := pm.table.SelectedRow()
+		if idx >= 0 && idx < len(pm.profiles) && pm.onEdit != nil {
+			pm.onEdit(pm.profiles[idx])
+		}
+		return true
+	case 'd':
+		idx := pm.table.SelectedRow()
+		if idx >= 0 && idx < len(pm.profiles) && pm.onDelete != nil {
+			pm.onDelete(pm.profiles[idx])
+		}
+		return true
+	case 'q':
+		if pm.onClose != nil {
+			pm.onClose()
+		}
+		return true
+	}
+
+	return pm.table.HandleKey(event)
 }
 
 // ProfileForm is a modal form for creating/editing a profile.
@@ -240,9 +233,9 @@ func NewProfileForm(name string, cfg config.ConnectionConfig, isEdit bool, onSav
 	return pf
 }
 
-func (pf *ProfileForm) Name() string             { return "Profile" }
-func (pf *ProfileForm) Start()                   {}
-func (pf *ProfileForm) Stop()                    {}
+func (pf *ProfileForm) Name() string { return "Profile" }
+func (pf *ProfileForm) Start()       {}
+func (pf *ProfileForm) Stop()        {}
 
 // getString safely extracts a string from the values map.
 func getString(values map[string]any, key string) string {
@@ -254,16 +247,12 @@ func getString(values map[string]any, key string) string {
 	return ""
 }
 
-func (pf *ProfileForm) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return pf.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		if event.Key() == tcell.KeyEscape {
-			if pf.onCancel != nil {
-				pf.onCancel()
-			}
-			return
+func (pf *ProfileForm) HandleKey(event *tcell.EventKey) bool {
+	if event.Key() == tcell.KeyEscape {
+		if pf.onCancel != nil {
+			pf.onCancel()
 		}
-		if handler := pf.form.InputHandler(); handler != nil {
-			handler(event, setFocus)
-		}
-	})
+		return true
+	}
+	return pf.form.HandleKey(event)
 }

@@ -10,17 +10,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/clipboard"
 	"github.com/galaxy-io/gnat/internal/nats"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 )
 
 const maxRetainedBytes = 64 * 1024 * 1024 // 64 MB byte budget for retained messages
-const maxRetainedMsgs  = 500              // hard cap on retained message count
+const maxRetainedMsgs = 500               // hard cap on retained message count
 
 // monitorState is the reactive snapshot pushed to the UI via binding.Value.
 // It is built by the processor goroutine and consumed by the render callback
@@ -54,23 +54,23 @@ type MessageMonitor struct {
 
 	// UI primitives (only touched on main goroutine)
 	table        *components.Table
-	preview      *tview.TextView
-	subjectInput *tview.InputField
-	statusText   *tview.TextView
-	modeText     *tview.TextView
-	topBar       *tview.Flex
+	preview      *core.TextView
+	subjectInput *components.TextField
+	statusText   *core.TextView
+	modeText     *core.TextView
+	topBar       *core.Flex
 
 	// Reactive state — processor goroutine writes, main goroutine reads via callback.
 	state *binding.Value[monitorState]
 
 	// Processor goroutine communication — the only shared mutable data.
-	mu           sync.Mutex // guards sub, msgChan, gen, useJS, policy, filterText
-	sub          nats.Subscription
-	msgChan      chan nats.LiveMessage
-	gen          int64 // subscription generation; incremented on every subscribe/unsubscribe
-	useJetStream bool
+	mu            sync.Mutex // guards sub, msgChan, gen, useJS, policy, filterText
+	sub           nats.Subscription
+	msgChan       chan nats.LiveMessage
+	gen           int64 // subscription generation; incremented on every subscribe/unsubscribe
+	useJetStream  bool
 	deliverPolicy nats.DeliverPolicy
-	filterText   string
+	filterText    string
 
 	// Lifecycle
 	stopped       int32
@@ -117,64 +117,52 @@ func (mm *MessageMonitor) buildUI(subject string) {
 	})
 
 	// Preview
-	mm.preview = tview.NewTextView().
+	mm.preview = core.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
-		SetWrap(true)
+		SetWordWrap(true)
 	mm.preview.SetBackgroundColor(theme.Bg())
-	theme.Register(mm.preview)
 
 	// Subject input
-	mm.subjectInput = tview.NewInputField().
+	mm.subjectInput = components.NewTextField("subject").
 		SetLabel("Subject: ").
-		SetFieldWidth(40).
 		SetPlaceholder(">")
 	mm.subjectInput.SetBackgroundColor(theme.Bg())
-	mm.subjectInput.SetFieldBackgroundColor(theme.Bg())
-	theme.Register(mm.subjectInput)
-	mm.subjectInput.SetDoneFunc(func(key tcell.Key) {
-		if key == tcell.KeyEnter {
-			subj := mm.subjectInput.GetText()
-			// subscribe is goroutine-safe; dispatch off main goroutine so
-			// the NATS handshake cannot block the event loop.
-			go mm.subscribe(subj)
-		} else if key == tcell.KeyEscape {
-			mm.app.app.SetFocus(mm.MasterDetailView)
-		}
+	mm.subjectInput.SetOnSubmit(func(_ *components.SubmitEvent) {
+		subj := mm.subjectInput.GetValue()
+		// subscribe is goroutine-safe; dispatch off main goroutine so
+		// the NATS handshake cannot block the event loop.
+		go mm.subscribe(subj)
 	})
 	if subject != "" {
-		mm.subjectInput.SetText(subject)
+		mm.subjectInput.SetValue(subject)
 	}
 
 	// Mode indicator
-	mm.modeText = tview.NewTextView().
+	mm.modeText = core.NewTextView().
 		SetDynamicColors(true).
-		SetTextAlign(tview.AlignRight)
+		SetTextAlign(core.AlignRight)
 	mm.modeText.SetBackgroundColor(theme.Bg())
-	theme.Register(mm.modeText)
 
 	// Status text
-	mm.statusText = tview.NewTextView().
+	mm.statusText = core.NewTextView().
 		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft)
+		SetTextAlign(core.AlignLeft)
 	mm.statusText.SetBackgroundColor(theme.Bg())
-	theme.Register(mm.statusText)
 	mm.statusText.SetText(fmt.Sprintf("[%s]Not subscribed[-]", theme.TagFgDim()))
 
 	// Top bar
-	mm.topBar = tview.NewFlex().SetDirection(tview.FlexColumn).
+	mm.topBar = core.NewFlex().SetDirection(core.Row).
 		AddItem(mm.subjectInput, 0, 1, true).
 		AddItem(mm.modeText, 20, 0, false).
 		AddItem(mm.statusText, 25, 0, false)
 	mm.topBar.SetBackgroundColor(theme.Bg())
-	theme.Register(mm.topBar)
 
 	// Master pane
-	masterContent := tview.NewFlex().SetDirection(tview.FlexRow).
+	masterContent := core.NewFlex().SetDirection(core.Column).
 		AddItem(mm.topBar, 1, 0, false).
 		AddItem(mm.table, 0, 1, true)
 	masterContent.SetBackgroundColor(theme.Bg())
-	theme.Register(masterContent)
 
 	// Master-detail view
 	mm.MasterDetailView = components.NewMasterDetailView().
@@ -190,9 +178,9 @@ func (mm *MessageMonitor) buildUI(subject string) {
 		mm.app.statusBar.SetCommandPlaceholder("search messages...")
 		mm.app.statusBar.EnterCommandMode()
 		if currentText != "" {
-			mm.app.statusBar.GetCommandInput().SetText(currentText)
+			mm.app.statusBar.SetCommandText(currentText)
 		}
-		mm.app.app.SetFocus(mm.app.statusBar.GetCommandInput())
+		mm.app.app.SetFocus(mm.app.statusBar)
 
 		mm.app.statusBar.SetOnCommandSubmit(func(text string) {
 			mm.app.statusBar.ExitCommandMode()
@@ -312,143 +300,135 @@ func (mm *MessageMonitor) Hints() []components.KeyHint {
 // All methods that need QueueUpdateDraw (subscribe, unsubscribe, togglePause,
 // etc.) are dispatched via `go` so they run outside the event loop.
 
-func (mm *MessageMonitor) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return mm.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		// Subject input has focus — delegate or escape
-		if mm.subjectInput.HasFocus() {
-			if event.Key() == tcell.KeyEscape {
-				setFocus(mm.MasterDetailView)
-				return
-			}
-			if handler := mm.subjectInput.InputHandler(); handler != nil {
-				handler(event, setFocus)
-			}
-			return
-		}
-
-		// Escape — clear pipeline first, then JSON filter, then search filter, then back-nav
+func (mm *MessageMonitor) HandleKey(event *tcell.EventKey) bool {
+	// Subject input has focus — delegate or escape
+	if mm.subjectInput.HasFocus() {
 		if event.Key() == tcell.KeyEscape {
-			if mm.pipeline != nil {
-				mm.pipeline = nil
-				mm.SetDetailTitle("Message Detail")
-				row, _ := mm.table.GetSelection()
-				mm.renderPreview(row - 1)
-				return
-			}
-			if mm.jsonFilter != "" {
-				mm.jsonFilter = ""
-				mm.SetDetailTitle("Message Detail")
-				row, _ := mm.table.GetSelection()
-				mm.renderPreview(row - 1)
-				return
-			}
-			if mm.GetSearchText() != "" {
-				mm.ClearSearch()
-				go mm.setFilter("")
-				return
-			}
-			return
+			mm.app.app.SetFocus(mm.MasterDetailView)
+			return true
 		}
+		return mm.subjectInput.HandleKey(event)
+	}
 
-		// Search key handling
-		if mm.HandleSearchKey(event) {
-			return
+	// Escape — clear pipeline first, then JSON filter, then search filter, then back-nav
+	if event.Key() == tcell.KeyEscape {
+		if mm.pipeline != nil {
+			mm.pipeline = nil
+			mm.SetDetailTitle("Message Detail")
+			row, _ := mm.table.GetSelection()
+			mm.renderPreview(row - 1)
+			return true
 		}
+		if mm.jsonFilter != "" {
+			mm.jsonFilter = ""
+			mm.SetDetailTitle("Message Detail")
+			row, _ := mm.table.GetSelection()
+			mm.renderPreview(row - 1)
+			return true
+		}
+		if mm.GetSearchText() != "" {
+			mm.ClearSearch()
+			go mm.setFilter("")
+			return true
+		}
+		return false
+	}
 
-		switch event.Rune() {
-		case '/':
-			mm.mu.Lock()
-			hasSub := mm.sub != nil
-			mm.mu.Unlock()
-			if !hasSub {
-				setFocus(mm.subjectInput)
-				return
+	// Search key handling
+	if mm.HandleSearchKey(event) {
+		return true
+	}
+
+	switch event.Rune() {
+	case '/':
+		mm.mu.Lock()
+		hasSub := mm.sub != nil
+		mm.mu.Unlock()
+		if !hasSub {
+			mm.app.app.SetFocus(mm.subjectInput)
+			return true
+		}
+		mm.ShowSearch()
+		return true
+	case 'c':
+		go mm.clearMessages()
+		return true
+	case 'p':
+		mm.ToggleDetail()
+		return true
+	case 'u':
+		go mm.unsubscribe()
+		return true
+	case 'm':
+		go mm.toggleMode()
+		return true
+	case 'y':
+		if msg, ok := mm.getSelectedMessage(); ok {
+			if err := clipboard.Copy(string(msg.Data)); err != nil {
+				mm.app.ShowError("Clipboard: " + err.Error())
+			} else {
+				mm.app.ShowSuccess(fmt.Sprintf("Copied %s", formatBytes(uint64(len(msg.Data)))))
 			}
-			mm.ShowSearch()
-			return
-		case 'c':
-			go mm.clearMessages()
-			return
-		case 'p':
-			mm.ToggleDetail()
-			return
-		case 'u':
-			go mm.unsubscribe()
-			return
-		case 'm':
-			go mm.toggleMode()
-			return
-		case 'y':
-			if msg, ok := mm.getSelectedMessage(); ok {
-				if err := clipboard.Copy(string(msg.Data)); err != nil {
+		}
+		return true
+	case 'Y':
+		if msg, ok := mm.getSelectedMessage(); ok {
+			full := map[string]any{
+				"subject":   msg.Subject,
+				"timestamp": msg.Timestamp.Format(time.RFC3339),
+				"sequence":  msg.Sequence,
+				"headers":   msg.Headers,
+			}
+			var payload any
+			if json.Unmarshal(msg.Data, &payload) == nil {
+				full["payload"] = payload
+			} else {
+				full["payload"] = string(msg.Data)
+			}
+			if data, err := json.MarshalIndent(full, "", "  "); err == nil {
+				if err := clipboard.Copy(string(data)); err != nil {
 					mm.app.ShowError("Clipboard: " + err.Error())
 				} else {
-					mm.app.ShowSuccess(fmt.Sprintf("Copied %s", formatBytes(uint64(len(msg.Data)))))
+					mm.app.ShowSuccess("Copied full message")
 				}
 			}
-			return
-		case 'Y':
-			if msg, ok := mm.getSelectedMessage(); ok {
-				full := map[string]any{
-					"subject":   msg.Subject,
-					"timestamp": msg.Timestamp.Format(time.RFC3339),
-					"sequence":  msg.Sequence,
-					"headers":   msg.Headers,
-				}
-				var payload any
-				if json.Unmarshal(msg.Data, &payload) == nil {
-					full["payload"] = payload
-				} else {
-					full["payload"] = string(msg.Data)
-				}
-				if data, err := json.MarshalIndent(full, "", "  "); err == nil {
-					if err := clipboard.Copy(string(data)); err != nil {
-						mm.app.ShowError("Clipboard: " + err.Error())
-					} else {
-						mm.app.ShowSuccess("Copied full message")
-					}
-				}
-			}
-			return
-		case 'R':
-			if msg, ok := mm.getSelectedMessage(); ok {
-				mm.showRepublishModal(msg)
-			}
-			return
-		case 'w':
-			mm.showPublishModal()
-			return
-		case 'v':
-			if msg, ok := mm.getSelectedMessage(); ok && msg.Stream != "" {
-				mm.app.NavigateToStreamDetail(msg.Stream)
-			}
-			return
-		case 'n':
-			if msg, ok := mm.getSelectedMessage(); ok && msg.Stream != "" {
-				mm.app.NavigateToConsumers(msg.Stream)
-			}
-			return
-		case 'b':
-			if msg, ok := mm.getSelectedMessage(); ok && msg.Stream != "" {
-				mm.app.NavigateToMessageBrowser(msg.Stream)
-			}
-			return
-		case 'f':
-			mm.showJSONFilterInput()
-			return
-		case 'F':
-			mm.showPipelineInput()
-			return
-		case 'd':
-			go mm.cycleDeliverPolicy()
-			return
 		}
+		return true
+	case 'R':
+		if msg, ok := mm.getSelectedMessage(); ok {
+			mm.showRepublishModal(msg)
+		}
+		return true
+	case 'w':
+		mm.showPublishModal()
+		return true
+	case 'v':
+		if msg, ok := mm.getSelectedMessage(); ok && msg.Stream != "" {
+			mm.app.NavigateToStreamDetail(msg.Stream)
+		}
+		return true
+	case 'n':
+		if msg, ok := mm.getSelectedMessage(); ok && msg.Stream != "" {
+			mm.app.NavigateToConsumers(msg.Stream)
+		}
+		return true
+	case 'b':
+		if msg, ok := mm.getSelectedMessage(); ok && msg.Stream != "" {
+			mm.app.NavigateToMessageBrowser(msg.Stream)
+		}
+		return true
+	case 'f':
+		mm.showJSONFilterInput()
+		return true
+	case 'F':
+		mm.showPipelineInput()
+		return true
+	case 'd':
+		go mm.cycleDeliverPolicy()
+		return true
+	}
 
-		// Delegate unhandled keys to master-detail
-		if handler := mm.MasterDetailView.InputHandler(); handler != nil {
-			handler(event, setFocus)
-		}
-	})
+	return mm.MasterDetailView.HandleKey(event)
 }
 
 // ── Subscribe / Unsubscribe ────────────────────────────────────────────────
@@ -808,7 +788,7 @@ func (mm *MessageMonitor) renderPreview(displayIdx int) {
 			b.WriteString(result)
 
 			mm.preview.SetText(b.String())
-			mm.preview.ScrollToBeginning()
+			mm.preview.ScrollTo(0, 0)
 			mm.SetDetailContent(mm.preview)
 			return
 		}
@@ -827,7 +807,7 @@ func (mm *MessageMonitor) renderPreview(displayIdx int) {
 			b.WriteString(result)
 
 			mm.preview.SetText(b.String())
-			mm.preview.ScrollToBeginning()
+			mm.preview.ScrollTo(0, 0)
 			mm.SetDetailContent(mm.preview)
 			return
 		}
@@ -847,7 +827,7 @@ func (mm *MessageMonitor) renderPreview(displayIdx int) {
 	b.WriteString(data)
 
 	mm.preview.SetText(b.String())
-	mm.preview.ScrollToBeginning()
+	mm.preview.ScrollTo(0, 0)
 	mm.SetDetailContent(mm.preview)
 }
 
@@ -1174,7 +1154,7 @@ func (mm *MessageMonitor) showRequestResponse(resp *nats.RequestResponse) {
 	data = strings.ReplaceAll(data, "[", "[[")
 	b.WriteString(data)
 
-	tv := tview.NewTextView().
+	tv := core.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true)
 	tv.SetBackgroundColor(theme.Bg())
@@ -1198,9 +1178,9 @@ func (mm *MessageMonitor) showJSONFilterInput() {
 	mm.app.statusBar.SetCommandPlaceholder(".field.nested")
 	mm.app.statusBar.EnterCommandMode()
 	if mm.jsonFilter != "" {
-		mm.app.statusBar.GetCommandInput().SetText(mm.jsonFilter)
+		mm.app.statusBar.SetCommandText(mm.jsonFilter)
 	}
-	mm.app.app.SetFocus(mm.app.statusBar.GetCommandInput())
+	mm.app.app.SetFocus(mm.app.statusBar)
 
 	mm.app.statusBar.SetOnCommandSubmit(func(text string) {
 		mm.app.statusBar.ExitCommandMode()
@@ -1225,9 +1205,9 @@ func (mm *MessageMonitor) showPipelineInput() {
 	mm.app.statusBar.SetCommandPlaceholder(".data | select(.status == \"active\") | map(.name)")
 	mm.app.statusBar.EnterCommandMode()
 	if mm.pipeline != nil {
-		mm.app.statusBar.GetCommandInput().SetText(mm.pipeline.String())
+		mm.app.statusBar.SetCommandText(mm.pipeline.String())
 	}
-	mm.app.app.SetFocus(mm.app.statusBar.GetCommandInput())
+	mm.app.app.SetFocus(mm.app.statusBar)
 
 	mm.app.statusBar.SetOnCommandSubmit(func(text string) {
 		mm.app.statusBar.ExitCommandMode()

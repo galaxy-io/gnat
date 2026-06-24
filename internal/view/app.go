@@ -8,15 +8,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/help"
-	"github.com/atterpac/jig/layout"
-	"github.com/atterpac/jig/nav"
-	"github.com/atterpac/jig/theme"
-	"github.com/atterpac/jig/theme/themes"
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/help"
+	"github.com/atterpac/dado/layout"
+	"github.com/atterpac/dado/nav"
+	"github.com/atterpac/dado/theme"
+	"github.com/atterpac/dado/theme/themes"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 
 	"github.com/galaxy-io/gnat/internal/clipboard"
 	"github.com/galaxy-io/gnat/internal/command"
@@ -87,13 +87,13 @@ func (a *App) buildApp() {
 	})
 
 	// Initialize toast manager
-	a.toasts = components.NewToastManager(a.app.GetApplication())
+	a.toasts = components.NewToastManager()
 	a.toasts.SetPosition(components.ToastBottomRight)
 	a.toasts.SetMaxVisible(3)
 	a.toasts.SetDefaultDuration(3 * time.Second)
 
 	// Set up toast drawing after main content
-	a.app.GetApplication().SetAfterDrawFunc(func(screen tcell.Screen) {
+	a.app.GetApp().SetAfterDrawFunc(func(screen tcell.Screen) {
 		w, h := screen.Size()
 		a.toasts.Draw(screen, w, h)
 	})
@@ -118,12 +118,12 @@ func (a *App) buildApp() {
 }
 
 func (a *App) isTextInputFocused() bool {
-	focused := a.app.GetApplication().GetFocus()
+	focused := a.app.GetApp().GetFocus()
 	if focused == nil {
 		return false
 	}
 	switch focused.(type) {
-	case *tview.InputField, *tview.TextArea:
+	case *components.TextField, *components.TextArea:
 		return true
 	}
 	return false
@@ -230,7 +230,6 @@ func (a *App) Provider() nats.Provider {
 	defer a.mu.RUnlock()
 	return a.provider
 }
-
 
 // QueueUpdateDraw queues a UI update and redraw (thread-safe).
 func (a *App) QueueUpdateDraw(fn func()) {
@@ -398,7 +397,7 @@ func (a *App) showCommandBar() {
 	})
 
 	a.statusBar.EnterCommandMode()
-	a.app.SetFocus(a.statusBar.GetCommandInput())
+	a.app.SetFocus(a.statusBar)
 
 	a.statusBar.SetOnCommandSubmit(func(text string) {
 		a.statusBar.ExitCommandMode()
@@ -537,7 +536,11 @@ func (a *App) handleCommand(text string) {
 
 func (a *App) refocusCurrent() {
 	if c := a.app.Pages().Current(); c != nil {
-		a.app.SetFocus(c)
+		if w, ok := c.(core.Widget); ok {
+			a.app.SetFocus(w)
+		} else {
+			a.app.SetFocus(a.app.Pages())
+		}
 	}
 }
 
@@ -825,9 +828,9 @@ func (a *App) showCommandConfirm(name string, cfg config.CommandConfig, expanded
 		title = fmt.Sprintf("Confirm: %s", cfg.Description)
 	}
 
-	infoText := tview.NewTextView().
+	infoText := core.NewTextView().
 		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft)
+		SetTextAlign(core.AlignLeft)
 	infoText.SetBackgroundColor(theme.Bg())
 	infoText.SetText(fmt.Sprintf("[%s]Command:[-] [%s]%s[-]\n\n[%s]%s[-]",
 		theme.TagFgDim(), theme.TagAccent(), name,
@@ -1252,25 +1255,20 @@ type themeSelectorWrapper struct {
 	selector *theme.ThemeSelectorModal
 }
 
-func (w *themeSelectorWrapper) Name() string                                { return "Theme" }
-func (w *themeSelectorWrapper) Start()                                      {}
-func (w *themeSelectorWrapper) Stop()                                       {}
-func (w *themeSelectorWrapper) Hints() []components.KeyHint                 { return nil }
-func (w *themeSelectorWrapper) Draw(screen tcell.Screen)                    { w.selector.Draw(screen) }
-func (w *themeSelectorWrapper) GetRect() (int, int, int, int)               { return w.selector.GetRect() }
-func (w *themeSelectorWrapper) SetRect(x, y, width, height int)             { w.selector.SetRect(x, y, width, height) }
-func (w *themeSelectorWrapper) InputHandler() func(*tcell.EventKey, func(tview.Primitive)) {
-	return w.selector.InputHandler()
+func (w *themeSelectorWrapper) Name() string                  { return "Theme" }
+func (w *themeSelectorWrapper) Start()                        {}
+func (w *themeSelectorWrapper) Stop()                         {}
+func (w *themeSelectorWrapper) Hints() []components.KeyHint   { return nil }
+func (w *themeSelectorWrapper) Draw(screen tcell.Screen)      { w.selector.Draw(screen) }
+func (w *themeSelectorWrapper) Rect() (int, int, int, int)    { return w.selector.Rect() }
+func (w *themeSelectorWrapper) GetRect() (int, int, int, int) { return w.selector.Rect() }
+func (w *themeSelectorWrapper) SetRect(x, y, width, height int) {
+	w.selector.SetRect(x, y, width, height)
 }
-func (w *themeSelectorWrapper) Focus(delegate func(tview.Primitive))        { w.selector.Focus(delegate) }
-func (w *themeSelectorWrapper) Blur()                                       { w.selector.Blur() }
-func (w *themeSelectorWrapper) HasFocus() bool                              { return w.selector.HasFocus() }
-func (w *themeSelectorWrapper) MouseHandler() func(tview.MouseAction, *tcell.EventMouse, func(tview.Primitive)) (bool, tview.Primitive) {
-	return w.selector.MouseHandler()
-}
-func (w *themeSelectorWrapper) PasteHandler() func(string, func(tview.Primitive)) {
-	return nil
-}
+func (w *themeSelectorWrapper) Focus()                            { w.selector.Focus() }
+func (w *themeSelectorWrapper) Blur()                             { w.selector.Blur() }
+func (w *themeSelectorWrapper) HasFocus() bool                    { return w.selector.HasFocus() }
+func (w *themeSelectorWrapper) HandleKey(ev *tcell.EventKey) bool { return w.selector.HandleKey(ev) }
 
 func (a *App) showProfileSelector() {
 	modal := NewProfileModal(
