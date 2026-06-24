@@ -34,6 +34,7 @@ func NewKVList(app *App) *KVList {
 
 	kl.table = components.NewTable().
 		SetHeaders("BUCKET", "KEYS", "BYTES", "HISTORY", "TTL", "COMPRESSED").
+		SetMultiSelect(true).
 		ConfigureEmpty(theme.IconKey, "No KV Stores", "")
 
 	kl.preview = core.NewTextView().
@@ -206,8 +207,8 @@ func (kl *KVList) bulkDelete() {
 		kl.app.ShowInfo("No KV buckets selected (use Space to select)")
 		return
 	}
-	label := fmt.Sprintf("%d KV buckets", len(keys))
-	ConfirmDelete(kl.app, "bulk", label, func() {
+	msg := fmt.Sprintf("Delete %d selected KV bucket(s)? This cannot be undone.", len(keys))
+	Confirm(kl.app, "Bulk Delete KV Buckets", msg, func() {
 		go func() {
 			for _, bucket := range keys {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -34,6 +34,7 @@ func NewObjectList(app *App) *ObjectList {
 
 	ol.table = components.NewTable().
 		SetHeaders("BUCKET", "SIZE", "REPLICAS", "SEALED").
+		SetMultiSelect(true).
 		ConfigureEmpty(theme.IconFolder, "No Object Stores", "")
 
 	ol.preview = core.NewTextView().
@@ -182,8 +183,8 @@ func (ol *ObjectList) bulkDelete() {
 		ol.app.ShowInfo("No object stores selected (use Space to select)")
 		return
 	}
-	label := fmt.Sprintf("%d object stores", len(keys))
-	ConfirmDelete(ol.app, "bulk", label, func() {
+	msg := fmt.Sprintf("Delete %d selected object store(s)? This cannot be undone.", len(keys))
+	Confirm(ol.app, "Bulk Delete Object Stores", msg, func() {
 		go func() {
 			for _, bucket := range keys {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

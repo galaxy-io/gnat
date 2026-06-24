@@ -117,7 +117,11 @@ func (mc *metricsCollector) recordStats(stats nats.ConnectionStats) {
 	now := time.Now()
 	if mc.hasFirst {
 		elapsed := now.Sub(mc.prevTime).Seconds()
-		if elapsed > 0 {
+		reset := stats.InMsgs < mc.prevStats.InMsgs ||
+			stats.OutMsgs < mc.prevStats.OutMsgs ||
+			stats.InBytes < mc.prevStats.InBytes ||
+			stats.OutBytes < mc.prevStats.OutBytes
+		if elapsed > 0 && !reset {
 			mc.msgsIn.add(float64(stats.InMsgs-mc.prevStats.InMsgs) / elapsed)
 			mc.msgsOut.add(float64(stats.OutMsgs-mc.prevStats.OutMsgs) / elapsed)
 			mc.bytesIn.add(float64(stats.InBytes-mc.prevStats.InBytes) / elapsed)

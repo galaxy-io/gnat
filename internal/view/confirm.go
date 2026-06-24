@@ -39,3 +39,15 @@ func ConfirmDelete(app *App, resourceType, resourceName string, onConfirm func()
 
 	app.app.Pages().Push(modal)
 }
+
+// Confirm shows a simple yes/no confirmation modal (Enter = confirm, Esc =
+// cancel). Use for bulk or low-risk destructive actions where type-to-confirm
+// is unnecessary friction.
+func Confirm(app *App, title, message string, onConfirm func()) {
+	modal := components.NewConfirmModal(title, message)
+	modal.SetOnSubmit(func() {
+		app.app.Pages().DismissModal()
+		onConfirm()
+	})
+	app.app.Pages().Push(modal)
+}

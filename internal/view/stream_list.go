@@ -45,6 +45,7 @@ func NewStreamList(app *App) *StreamList {
 
 	sl.table = components.NewTable().
 		SetHeaders("NAME", "MSGS", "BYTES", "CONSUMERS", "STORAGE", "REPLICAS").
+		SetMultiSelect(true).
 		ConfigureEmpty(theme.IconDatabase, "No Streams", "")
 
 	sl.preview = core.NewTextView().
@@ -190,7 +191,7 @@ func (sl *StreamList) Hints() []components.KeyHint {
 		{Key: "d", Description: "Delete"},
 		{Key: "Space", Description: "Select"},
 		{Key: "D", Description: "Bulk Delete"},
-		{Key: "P", Description: "Bulk Purge"},
+		{Key: "X", Description: "Bulk Purge"},
 		{Key: "y", Description: "Yank"},
 		{Key: "p", Description: "Preview"},
 		{Key: "r", Description: "Refresh"},
@@ -263,7 +264,7 @@ func (sl *StreamList) HandleKey(event *tcell.EventKey) bool {
 	case event.Rune() == 'D':
 		sl.bulkDelete()
 		return true
-	case event.Rune() == 'P' && event.Modifiers() == 0:
+	case event.Rune() == 'X' && event.Modifiers() == 0:
 		sl.bulkPurge()
 		return true
 	case event.Rune() == 'p':
@@ -434,8 +435,8 @@ func (sl *StreamList) bulkDelete() {
 		sl.app.ShowInfo("No streams selected (use Space to select)")
 		return
 	}
-	label := fmt.Sprintf("%d streams", len(keys))
-	ConfirmDelete(sl.app, "bulk", label, func() {
+	msg := fmt.Sprintf("Delete %d selected stream(s)? This cannot be undone.", len(keys))
+	Confirm(sl.app, "Bulk Delete Streams", msg, func() {
 		go func() {
 			for _, name := range keys {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -457,8 +458,8 @@ func (sl *StreamList) bulkPurge() {
 		sl.app.ShowInfo("No streams selected (use Space to select)")
 		return
 	}
-	label := fmt.Sprintf("%d streams", len(keys))
-	ConfirmDelete(sl.app, "purge", label, func() {
+	msg := fmt.Sprintf("Purge all messages from %d selected stream(s)? This cannot be undone.", len(keys))
+	Confirm(sl.app, "Bulk Purge Streams", msg, func() {
 		go func() {
 			for _, name := range keys {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
