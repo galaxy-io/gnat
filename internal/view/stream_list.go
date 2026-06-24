@@ -45,6 +45,7 @@ func NewStreamList(app *App) *StreamList {
 
 	sl.table = components.NewTable().
 		SetHeaders("NAME", "MSGS", "BYTES", "CONSUMERS", "STORAGE", "REPLICAS").
+		SetMultiSelect(true).
 		ConfigureEmpty(theme.IconDatabase, "No Streams", "")
 
 	sl.preview = core.NewTextView().

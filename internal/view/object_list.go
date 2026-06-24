@@ -34,6 +34,7 @@ func NewObjectList(app *App) *ObjectList {
 
 	ol.table = components.NewTable().
 		SetHeaders("BUCKET", "SIZE", "REPLICAS", "SEALED").
+		SetMultiSelect(true).
 		ConfigureEmpty(theme.IconFolder, "No Object Stores", "")
 
 	ol.preview = core.NewTextView().

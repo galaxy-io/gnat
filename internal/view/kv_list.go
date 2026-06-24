@@ -34,6 +34,7 @@ func NewKVList(app *App) *KVList {
 
 	kl.table = components.NewTable().
 		SetHeaders("BUCKET", "KEYS", "BYTES", "HISTORY", "TTL", "COMPRESSED").
+		SetMultiSelect(true).
 		ConfigureEmpty(theme.IconKey, "No KV Stores", "")
 
 	kl.preview = core.NewTextView().

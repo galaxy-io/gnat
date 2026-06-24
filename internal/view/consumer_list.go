@@ -49,6 +49,7 @@ func NewConsumerList(app *App, streamName string) *ConsumerList {
 
 	cl.table = components.NewTable().
 		SetHeaders("NAME", "TYPE", "PENDING", "ACK_PEND", "REDELIVERED", "WAITING").
+		SetMultiSelect(true).
 		ConfigureEmpty(theme.IconList, "No Consumers", "")
 
 	cl.preview = core.NewTextView().
