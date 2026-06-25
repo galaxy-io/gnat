@@ -3,7 +3,7 @@ module github.com/galaxy-io/gnat
 go 1.25.0
 
 require (
-	github.com/atterpac/dado v0.2.8
+	github.com/atterpac/dado v0.2.9
 	github.com/gdamore/tcell/v2 v2.13.4
 	github.com/nats-io/nats.go v1.39.1
 	golang.org/x/term v0.37.0
