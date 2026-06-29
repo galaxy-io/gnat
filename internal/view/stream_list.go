@@ -85,10 +85,8 @@ func NewStreamList(app *App) *StreamList {
 		}).
 		SetRefreshInterval(10 * time.Second).
 		SetOnSelect(func(s *jetstream.StreamInfo) {
-			// Enter opens watch view directly
-			if len(s.Config.Subjects) > 0 {
-				sl.app.NavigateToMessageMonitorWithSubject(s.Config.Subjects[0])
-			}
+			// Enter opens watch view directly — watch the whole stream.
+			sl.app.NavigateToMessageMonitorForStream(s.Config.Name)
 		}).
 		SetOnRefresh(func(data []*jetstream.StreamInfo, err error) {
 			if err != nil {
@@ -201,8 +199,8 @@ func (sl *StreamList) Hints() []components.KeyHint {
 func (sl *StreamList) HandleKey(event *tcell.EventKey) bool {
 	switch {
 	case event.Key() == tcell.KeyEnter:
-		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil && len(s.Config.Subjects) > 0 {
-			sl.app.NavigateToMessageMonitorWithSubject(s.Config.Subjects[0])
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			sl.app.NavigateToMessageMonitorForStream(s.Config.Name)
 		}
 		return true
 	case event.Rune() == 'v':

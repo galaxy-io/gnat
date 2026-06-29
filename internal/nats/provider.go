@@ -108,6 +108,9 @@ type Provider interface {
 
 	// JetStream subscription with replay capability
 	SubscribeJetStream(ctx context.Context, subject string, policy DeliverPolicy, handler func(LiveMessage)) (Subscription, error)
+
+	// JetStream subscription over an entire stream (no subject filter — all subjects)
+	SubscribeJetStreamStream(ctx context.Context, streamName string, policy DeliverPolicy, handler func(LiveMessage)) (Subscription, error)
 }
 
 // ConnectionStats holds basic connection statistics.

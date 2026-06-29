@@ -99,8 +99,11 @@ func seedStreams(ctx context.Context, js jetstream.JetStream) {
 			Discard:     jetstream.DiscardOld,
 		},
 		{
-			Name:        "EVENTS",
-			Subjects:    []string{"events.>"},
+			Name: "EVENTS",
+			// Multiple disjoint subjects: "audit.>" does NOT start with
+			// "events." — watching the stream must surface these too, not just
+			// the first configured subject.
+			Subjects:    []string{"events.>", "audit.>"},
 			Retention:   jetstream.InterestPolicy,
 			MaxAge:      72 * time.Hour,
 			Storage:     jetstream.FileStorage,
@@ -326,6 +329,18 @@ func seedMessages(ctx context.Context, js jetstream.JetStream, nc *nats.Conn) {
 		messages = append(messages, msg{
 			subject: fmt.Sprintf("events.%s", evt),
 			data:    fmt.Sprintf(`{"event":"%s","user_id":"usr-%05d","region":"%s","session":"%08x","metadata":{"source":"web","version":"2.1.0"}}`, evt, rand.Intn(10000), region, rand.Uint32()),
+		})
+	}
+
+	// Audit — second subject on the EVENTS stream that does NOT start with
+	// "events.". Watching the EVENTS stream should surface these alongside
+	// the events.* messages; the old single-subject watch missed them.
+	auditActions := []string{"login", "logout", "permission.grant", "permission.revoke", "config.change"}
+	for i := 0; i < 80; i++ {
+		action := auditActions[rand.Intn(len(auditActions))]
+		messages = append(messages, msg{
+			subject: fmt.Sprintf("audit.%s", action),
+			data:    fmt.Sprintf(`{"action":"%s","actor":"admin-%03d","target":"usr-%05d","ip":"10.0.%d.%d","result":"%s"}`, action, rand.Intn(50), rand.Intn(10000), rand.Intn(256), rand.Intn(256), []string{"allow", "deny"}[rand.Intn(2)]),
 		})
 	}
 

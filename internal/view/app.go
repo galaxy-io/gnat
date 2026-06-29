@@ -157,6 +157,7 @@ func (a *App) setup() {
 			}
 			if a.app.Pages().CanPop() {
 				a.app.Pages().Pop()
+				a.app.SetFocus(a.app.Pages())
 				return nil
 			}
 			return event
@@ -307,6 +308,11 @@ func (a *App) NavigateToDebug() {
 
 func (a *App) NavigateToMessageMonitorWithSubject(subject string) {
 	view := NewMessageMonitorWithSubject(a, subject)
+	a.app.Pages().Push(view)
+}
+
+func (a *App) NavigateToMessageMonitorForStream(streamName string) {
+	view := NewMessageMonitorForStream(a, streamName)
 	a.app.Pages().Push(view)
 }
 

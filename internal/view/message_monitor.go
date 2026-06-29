@@ -79,6 +79,10 @@ type MessageMonitor struct {
 	// Initial subject (for auto-subscribe on Start)
 	initSubject string
 
+	// When set, the monitor watches this entire stream (all subjects) instead
+	// of a single subject filter. The subject input becomes a client-side filter.
+	streamName string
+
 	// JSON path / pipeline filter for preview pane
 	jsonFilter string
 	pipeline   *Pipeline
@@ -87,6 +91,24 @@ type MessageMonitor struct {
 // NewMessageMonitor creates the message monitor view.
 func NewMessageMonitor(app *App) *MessageMonitor {
 	return NewMessageMonitorWithSubject(app, "")
+}
+
+// NewMessageMonitorForStream creates a monitor that watches an entire stream
+// (every subject it stores), rather than a single subject filter. The subject
+// field acts as a client-side filter over the live messages instead of
+// changing the subscription.
+func NewMessageMonitorForStream(app *App, streamName string) *MessageMonitor {
+	mm := &MessageMonitor{
+		app:           app,
+		useJetStream:  true,
+		deliverPolicy: nats.DeliverAll,
+		streamName:    streamName,
+		processCancel: func() {},
+	}
+
+	mm.buildUI("")
+	mm.setupBinding()
+	return mm
 }
 
 // NewMessageMonitorWithSubject creates the message monitor with a pre-filled subject.
@@ -123,16 +145,30 @@ func (mm *MessageMonitor) buildUI(subject string) {
 		SetWordWrap(true)
 	mm.preview.SetBackgroundColor(theme.Bg())
 
-	// Subject input
+	// Subject input. In stream-watch mode it filters the live list client-side
+	// rather than re-subscribing, since the subscription already covers the
+	// whole stream.
+	subjectLabel := "Subject: "
+	subjectPlaceholder := ">"
+	if mm.streamName != "" {
+		subjectLabel = "Filter: "
+		subjectPlaceholder = "filter subjects..."
+	}
 	mm.subjectInput = components.NewTextField("subject").
-		SetLabel("Subject: ").
-		SetPlaceholder(">")
+		SetLabel(subjectLabel).
+		SetPlaceholder(subjectPlaceholder)
 	mm.subjectInput.SetBackgroundColor(theme.Bg())
 	mm.subjectInput.SetOnSubmit(func(_ *components.SubmitEvent) {
-		subj := mm.subjectInput.GetValue()
-		// subscribe is goroutine-safe; dispatch off main goroutine so
-		// the NATS handshake cannot block the event loop.
-		go mm.subscribe(subj)
+		val := mm.subjectInput.GetValue()
+		// Move focus off the text input so arrow keys navigate the message
+		// list instead of being captured by the field.
+		mm.app.app.SetFocus(mm.MasterDetailView)
+		// Dispatch off the main goroutine so the work can't block the event loop.
+		if mm.streamName != "" {
+			go mm.setFilter(val)
+			return
+		}
+		go mm.subscribe(val)
 	})
 	if subject != "" {
 		mm.subjectInput.SetValue(subject)
@@ -236,6 +272,12 @@ func (mm *MessageMonitor) Name() string {
 func (mm *MessageMonitor) Start() {
 	// Start() runs on main goroutine — safe to touch UI directly.
 	atomic.StoreInt32(&mm.stopped, 0)
+
+	// Whole-stream watch: subscribe to the entire stream regardless of subject.
+	if mm.streamName != "" {
+		go mm.subscribe("")
+		return
+	}
 
 	// Re-subscribe to whatever subject was active (or the initial one).
 	subject := mm.state.Get().subject
@@ -434,8 +476,21 @@ func (mm *MessageMonitor) HandleKey(event *tcell.EventKey) bool {
 // ── Subscribe / Unsubscribe ────────────────────────────────────────────────
 
 func (mm *MessageMonitor) subscribe(subject string) {
-	if subject == "" || atomic.LoadInt32(&mm.stopped) == 1 {
+	if atomic.LoadInt32(&mm.stopped) == 1 {
 		return
+	}
+
+	// Whole-stream watch mode: no subject filter, drive off the stream name.
+	streamMode := mm.streamName != "" && subject == ""
+	if subject == "" && !streamMode {
+		return
+	}
+
+	// Label used for display/state (the subscription itself is by stream in
+	// stream mode, so there is no single subject to show).
+	displayLabel := subject
+	if streamMode {
+		displayLabel = fmt.Sprintf("%s (all subjects)", mm.streamName)
 	}
 
 	// Tear down any existing subscription first.
@@ -461,7 +516,7 @@ func (mm *MessageMonitor) subscribe(subject string) {
 	// Push "subscribing" state.
 	mm.state.SetAndDraw(monitorState{
 		status:  statusSubscribing,
-		subject: subject,
+		subject: displayLabel,
 		mode:    mm.modeLabel(),
 		policy:  mm.policyLabel(),
 	})
@@ -469,7 +524,7 @@ func (mm *MessageMonitor) subscribe(subject string) {
 	// Start processor goroutine for this subscription.
 	processCtx, processCancel := context.WithCancel(context.Background())
 	mm.processCancel = processCancel
-	go mm.processMessages(processCtx, myGen, msgChan, subject)
+	go mm.processMessages(processCtx, myGen, msgChan, displayLabel)
 
 	// Handler: never blocks, never holds locks. Channel send is guarded by
 	// recover so a closed-channel panic in the narrow unsubscribe race is safe.
@@ -489,7 +544,12 @@ func (mm *MessageMonitor) subscribe(subject string) {
 	var err error
 	var modeLabel string
 
-	if useJS {
+	if streamMode {
+		// Whole-stream watch is inherently JetStream — no single subject for
+		// a core NATS subscription to bind to.
+		sub, err = provider.SubscribeJetStreamStream(context.Background(), mm.streamName, policy, handler)
+		modeLabel = "JetStream"
+	} else if useJS {
 		sub, err = provider.SubscribeJetStream(context.Background(), subject, policy, handler)
 		modeLabel = "JetStream"
 	} else {
@@ -497,8 +557,8 @@ func (mm *MessageMonitor) subscribe(subject string) {
 		modeLabel = "Core NATS"
 	}
 
-	// Fallback to core NATS if JetStream fails.
-	if err != nil && useJS {
+	// Fallback to core NATS if JetStream fails (single-subject mode only).
+	if err != nil && useJS && !streamMode {
 		sub, err = provider.Subscribe(context.Background(), subject, handler)
 		if err == nil {
 			modeLabel = "Core NATS (fallback)"
@@ -511,7 +571,7 @@ func (mm *MessageMonitor) subscribe(subject string) {
 	if err != nil {
 		mm.state.SetAndDraw(monitorState{
 			status:  statusError,
-			subject: subject,
+			subject: displayLabel,
 			errMsg:  err.Error(),
 			mode:    mm.modeLabel(),
 			policy:  mm.policyLabel(),
@@ -533,7 +593,7 @@ func (mm *MessageMonitor) subscribe(subject string) {
 	mm.mu.Unlock()
 
 	mm.app.QueueUpdateDraw(func() {
-		mm.app.ShowSuccess(fmt.Sprintf("Subscribed to %s (%s)", subject, modeLabel))
+		mm.app.ShowSuccess(fmt.Sprintf("Subscribed to %s (%s)", displayLabel, modeLabel))
 	})
 }
 
