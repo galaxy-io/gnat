@@ -157,6 +157,7 @@ func (a *App) setup() {
 			}
 			if a.app.Pages().CanPop() {
 				a.app.Pages().Pop()
+				a.app.SetFocus(a.app.Pages())
 				return nil
 			}
 			return event
