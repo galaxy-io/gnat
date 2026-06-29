@@ -877,7 +877,19 @@ func (c *Client) SubscribeJetStream(ctx context.Context, subject string, policy 
 	if err != nil {
 		return nil, fmt.Errorf("no stream found for subject %q: %w", subject, err)
 	}
+	return c.subscribeJetStream(ctx, streamName, subject, policy, handler)
+}
 
+// SubscribeJetStreamStream creates a JetStream subscription over an entire
+// stream. The ephemeral consumer carries no subject filter, so every message
+// in the stream is delivered regardless of which configured subject it matched.
+func (c *Client) SubscribeJetStreamStream(ctx context.Context, streamName string, policy DeliverPolicy, handler func(LiveMessage)) (Subscription, error) {
+	return c.subscribeJetStream(ctx, streamName, "", policy, handler)
+}
+
+// subscribeJetStream creates an ephemeral consumer on streamName. An empty
+// filterSubject watches the whole stream; a non-empty one narrows to that subject.
+func (c *Client) subscribeJetStream(ctx context.Context, streamName, filterSubject string, policy DeliverPolicy, handler func(LiveMessage)) (Subscription, error) {
 	stream, err := c.jetStream().Stream(ctx, streamName)
 	if err != nil {
 		return nil, fmt.Errorf("getting stream %s: %w", streamName, err)
@@ -898,9 +910,9 @@ func (c *Client) SubscribeJetStream(ctx context.Context, subject string, policy 
 		jsPolicy = jetstream.DeliverAllPolicy
 	}
 
-	// Create ephemeral consumer
+	// Create ephemeral consumer. An empty FilterSubject delivers all subjects.
 	consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		FilterSubject:     subject,
+		FilterSubject:     filterSubject,
 		DeliverPolicy:     jsPolicy,
 		AckPolicy:         jetstream.AckNonePolicy, // No acks needed for monitoring
 		InactiveThreshold: 5 * time.Minute,

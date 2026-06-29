@@ -137,8 +137,8 @@ func (sd *StreamDetail) HandleKey(event *tcell.EventKey) bool {
 		go sd.showSubjectBreakdown()
 		return true
 	case 'w':
-		if info := sd.info.Get(); info != nil && len(info.Config.Subjects) > 0 {
-			sd.app.NavigateToMessageMonitorWithSubject(info.Config.Subjects[0])
+		if info := sd.info.Get(); info != nil {
+			sd.app.NavigateToMessageMonitorForStream(info.Config.Name)
 		}
 		return true
 	case 'e':

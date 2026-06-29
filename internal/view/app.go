@@ -310,6 +310,11 @@ func (a *App) NavigateToMessageMonitorWithSubject(subject string) {
 	a.app.Pages().Push(view)
 }
 
+func (a *App) NavigateToMessageMonitorForStream(streamName string) {
+	view := NewMessageMonitorForStream(a, streamName)
+	a.app.Pages().Push(view)
+}
+
 func (a *App) NavigateToConsumerLag() {
 	view := NewConsumerLag(a)
 	a.app.Pages().Push(view)
