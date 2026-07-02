@@ -3,30 +3,30 @@ package view
 import (
 	"context"
 
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/nav"
-	"github.com/atterpac/jig/theme"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/nav"
+	"github.com/atterpac/dado/theme"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 )
 
 // CommandOutputView is a nav.Component wrapper for command output display.
 // It can hold a LogViewer (streaming) or CodeView (static JSON) as its inner view.
 type CommandOutputView struct {
-	*tview.Flex
+	*core.Flex
 	app         *App
 	cmdName     string
 	description string
-	inner       tview.Primitive
+	inner       core.Widget
 	cancelFn    context.CancelFunc
 }
 
 // NewCommandOutputView creates a new command output view.
-func NewCommandOutputView(app *App, cmdName, description string, inner tview.Primitive, cancelFn context.CancelFunc) *CommandOutputView {
+func NewCommandOutputView(app *App, cmdName, description string, inner core.Widget, cancelFn context.CancelFunc) *CommandOutputView {
 	panel := components.NewPanel().SetTitle(description)
 	panel.SetContent(inner)
 
-	flex := tview.NewFlex().SetDirection(tview.FlexRow)
+	flex := core.NewFlex().SetDirection(core.Column)
 	flex.SetBackgroundColor(theme.Bg())
 	flex.AddItem(panel, 0, 1, true)
 
@@ -69,8 +69,9 @@ func (c *CommandOutputView) Hints() []components.KeyHint {
 	return hints
 }
 
-func (c *CommandOutputView) Focus(delegate func(p tview.Primitive)) {
-	delegate(c.inner)
+func (c *CommandOutputView) Focus() {
+	c.Flex.Focus()
+	c.inner.Focus()
 }
 
 func (c *CommandOutputView) Draw(screen tcell.Screen) {

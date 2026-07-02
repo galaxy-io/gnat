@@ -7,6 +7,7 @@ A [NATS](https://nats.io) JetStream TUI that won't bug you
 [![GitHub Release](https://img.shields.io/github/v/release/galaxy-io/gnat)](https://github.com/galaxy-io/gnat/releases)
 [![License](https://img.shields.io/github/license/galaxy-io/gnat)](https://github.com/galaxy-io/gnat/blob/main/LICENSE)
 ![GitHub Downloads](https://img.shields.io/github/downloads/galaxy-io/gnat/total)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/galaxy-io/gnat)
 
 </div>
 
@@ -212,4 +213,4 @@ To report a bug, make a feature request, and more, visit our [issues page](https
 
 - [NATS](https://nats.io) - The messaging system this client connects to
 - [tview](https://github.com/rivo/tview) - Terminal UI library
-- [jig](https://github.com/atterpac/jig) - UI component framework
+- [dado](https://github.com/atterpac/dado) - UI component framework

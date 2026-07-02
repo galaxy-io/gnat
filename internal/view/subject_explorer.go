@@ -1,18 +1,21 @@
 package view
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
+	"github.com/galaxy-io/gnat/internal/nats"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 )
 
 type subjectNodeData struct {
@@ -33,17 +36,21 @@ type SubjectExplorer struct {
 	app *App
 
 	tree    *components.Tree
-	preview *tview.TextView
+	preview *core.TextView
 
-	state       *binding.Value[subjectExplorerState]
-	stopRefresh chan struct{}
-	stopped     int32
+	state         *binding.Value[subjectExplorerState]
+	refreshCancel context.CancelFunc
+	stopped       int32
+
+	// Recent messages preview
+	previewCancel context.CancelFunc
+	previewData   *subjectNodeData
 }
 
 func NewSubjectExplorer(app *App) *SubjectExplorer {
 	se := &SubjectExplorer{
-		app:         app,
-		stopRefresh: make(chan struct{}, 1),
+		app:           app,
+		refreshCancel: func() {},
 	}
 
 	se.tree = components.NewTree().
@@ -67,12 +74,11 @@ func NewSubjectExplorer(app *App) *SubjectExplorer {
 		}
 	})
 
-	se.preview = tview.NewTextView().
+	se.preview = core.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
-		SetWrap(true)
+		SetWordWrap(true)
 	se.preview.SetBackgroundColor(theme.Bg())
-	theme.Register(se.preview)
 
 	se.MasterDetailView = components.NewMasterDetailView().
 		SetMasterTitle("Subjects").
@@ -93,14 +99,16 @@ func (se *SubjectExplorer) Name() string { return "Subject Explorer" }
 
 func (se *SubjectExplorer) Start() {
 	atomic.StoreInt32(&se.stopped, 0)
-	se.stopRefresh = make(chan struct{}, 1)
+	se.refreshCancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	se.refreshCancel = cancel
 	go func() {
 		se.refresh()
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-se.stopRefresh:
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				se.refresh()
@@ -111,10 +119,7 @@ func (se *SubjectExplorer) Start() {
 
 func (se *SubjectExplorer) Stop() {
 	atomic.StoreInt32(&se.stopped, 1)
-	select {
-	case se.stopRefresh <- struct{}{}:
-	default:
-	}
+	se.refreshCancel()
 }
 
 func (se *SubjectExplorer) Hints() []components.KeyHint {
@@ -130,39 +135,34 @@ func (se *SubjectExplorer) Hints() []components.KeyHint {
 	}
 }
 
-func (se *SubjectExplorer) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return se.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch event.Rune() {
-		case 'v':
-			if node := se.tree.GetSelected(); node != nil {
-				if data, ok := node.Data.(*subjectNodeData); ok && len(data.Streams) > 0 {
-					se.app.NavigateToStreamDetail(data.Streams[0])
-				}
+func (se *SubjectExplorer) HandleKey(event *tcell.EventKey) bool {
+	switch event.Rune() {
+	case 'v':
+		if node := se.tree.GetSelected(); node != nil {
+			if data, ok := node.Data.(*subjectNodeData); ok && len(data.Streams) > 0 {
+				se.app.NavigateToStreamDetail(data.Streams[0])
 			}
-			return
-		case 'r':
-			go se.refresh()
-			return
-		case 'p':
-			se.ToggleDetail()
-			return
-		case '/':
-			se.showFilter()
-			return
 		}
+		return true
+	case 'r':
+		go se.refresh()
+		return true
+	case 'p':
+		se.ToggleDetail()
+		return true
+	case '/':
+		se.showFilter()
+		return true
+	}
 
-		// Delegate to tree for j/k/h/l/o/O/C/Enter etc.
-		if handler := se.tree.InputHandler(); handler != nil {
-			handler(event, setFocus)
-		}
-	})
+	return se.tree.HandleKey(event)
 }
 
 func (se *SubjectExplorer) showFilter() {
 	se.app.statusBar.SetCommandPrompt("Filter: ")
 	se.app.statusBar.SetCommandPlaceholder("subject pattern...")
 	se.app.statusBar.EnterCommandMode()
-	se.app.app.SetFocus(se.app.statusBar.GetCommandInput())
+	se.app.app.SetFocus(se.app.statusBar)
 
 	se.app.statusBar.SetOnCommandSubmit(func(text string) {
 		se.app.statusBar.ExitCommandMode()
@@ -398,6 +398,53 @@ func (se *SubjectExplorer) renderPreview(node *components.TreeNode) {
 		return
 	}
 
+	// Cancel any in-flight preview fetch
+	if se.previewCancel != nil {
+		se.previewCancel()
+	}
+	se.previewData = data
+
+	// Render metadata immediately
+	se.renderPreviewText(data, nil)
+
+	// Only fetch messages for leaf subjects with at least one stream
+	if !node.IsLeaf() || len(data.Streams) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	se.previewCancel = cancel
+
+	subject := data.FullPath
+	streams := make([]string, len(data.Streams))
+	copy(streams, data.Streams)
+
+	go func() {
+		defer cancel()
+		provider := se.app.Provider()
+		if provider == nil {
+			return
+		}
+		var msgs []*nats.RawMessage
+		for _, stream := range streams {
+			if ctx.Err() != nil {
+				return
+			}
+			fetched, err := provider.GetRecentMessagesForSubject(ctx, stream, subject, previewMaxBytes, previewMaxMsgs)
+			if err != nil {
+				continue
+			}
+			msgs = append(msgs, fetched...)
+		}
+		se.app.QueueUpdateDraw(func() {
+			if se.previewData == data {
+				se.renderPreviewText(data, msgs)
+			}
+		})
+	}()
+}
+
+func (se *SubjectExplorer) renderPreviewText(data *subjectNodeData, msgs []*nats.RawMessage) {
 	dim := theme.TagFgDim()
 	accent := theme.TagAccent()
 
@@ -412,6 +459,26 @@ func (se *SubjectExplorer) renderPreview(node *components.TreeNode) {
 		}
 	}
 
+	if len(msgs) > 0 {
+		fmt.Fprintf(&b, "\n[%s]Recent Messages:[-]\n", dim)
+		for _, msg := range msgs {
+			ts := msg.Time.Format("15:04:05")
+			fmt.Fprintf(&b, "\n  [%s]%s[-] [%s]seq=%d  %s  %s[-]\n", accent, msg.Subject, dim, msg.Sequence, ts, formatBytes(uint64(len(msg.Data))))
+			payload := string(msg.Data)
+			if json.Valid(msg.Data) {
+				var pretty bytes.Buffer
+				if err := json.Indent(&pretty, msg.Data, "    ", "  "); err == nil {
+					payload = pretty.String()
+				}
+			}
+			payload = strings.ReplaceAll(payload, "[", "[[")
+			if len(payload) > 500 {
+				payload = payload[:500] + "..."
+			}
+			fmt.Fprintf(&b, "    %s\n", payload)
+		}
+	}
+
 	se.preview.SetText(b.String())
-	se.preview.ScrollToBeginning()
+	se.preview.ScrollTo(0, 0)
 }

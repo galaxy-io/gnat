@@ -3,8 +3,8 @@ package view
 import (
 	"fmt"
 
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/validators"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/validators"
 )
 
 // ConfirmDelete shows a type-to-confirm deletion modal.
@@ -37,5 +37,17 @@ func ConfirmDelete(app *App, resourceType, resourceName string, onConfirm func()
 		{Key: "Esc", Description: "Cancel"},
 	})
 
+	app.app.Pages().Push(modal)
+}
+
+// Confirm shows a simple yes/no confirmation modal (Enter = confirm, Esc =
+// cancel). Use for bulk or low-risk destructive actions where type-to-confirm
+// is unnecessary friction.
+func Confirm(app *App, title, message string, onConfirm func()) {
+	modal := components.NewConfirmModal(title, message)
+	modal.SetOnSubmit(func() {
+		app.app.Pages().DismissModal()
+		onConfirm()
+	})
 	app.app.Pages().Push(modal)
 }

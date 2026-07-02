@@ -64,9 +64,14 @@ func main() {
 	}
 
 	if *liveMode {
+		// Subscribe to core NATS subjects so messages actually flow
+		// (without subscribers, published core msgs are silently dropped by the server).
+		for _, subj := range []string{"ping", "status.>", "telemetry.>", "chat.>"} {
+			nc.Subscribe(subj, func(msg *nats.Msg) {}) //nolint:errcheck
+		}
 		fmt.Printf("\nStarting live publisher (rate: %v)...\n", *liveRate)
-		fmt.Println("Publishing to: orders.*, events.*, logs.*, metrics.*, notify.*")
-		fmt.Println("Press Ctrl+C to stop\n")
+		fmt.Println("Publishing to: orders.*, events.*, logs.*, metrics.*, notify.*, ping, status.*, chat.*")
+		fmt.Println("Press Ctrl+C to stop")
 		runLivePublisher(nc, js, *liveRate)
 	}
 
@@ -94,8 +99,11 @@ func seedStreams(ctx context.Context, js jetstream.JetStream) {
 			Discard:     jetstream.DiscardOld,
 		},
 		{
-			Name:        "EVENTS",
-			Subjects:    []string{"events.>"},
+			Name: "EVENTS",
+			// Multiple disjoint subjects: "audit.>" does NOT start with
+			// "events." — watching the stream must surface these too, not just
+			// the first configured subject.
+			Subjects:    []string{"events.>", "audit.>"},
 			Retention:   jetstream.InterestPolicy,
 			MaxAge:      72 * time.Hour,
 			Storage:     jetstream.FileStorage,
@@ -154,16 +162,16 @@ func seedConsumers(ctx context.Context, js jetstream.JetStream) {
 		{
 			stream: "ORDERS",
 			cfg: jetstream.ConsumerConfig{
-				Name:           "order-processor",
-				Durable:        "order-processor",
-				Description:    "Main order processing worker",
-				AckPolicy:      jetstream.AckExplicitPolicy,
-				AckWait:        30 * time.Second,
-				MaxDeliver:     5,
-				MaxAckPending:  1000,
-				FilterSubject:  "orders.created",
-				DeliverPolicy:  jetstream.DeliverAllPolicy,
-				MaxWaiting:     512,
+				Name:          "order-processor",
+				Durable:       "order-processor",
+				Description:   "Main order processing worker",
+				AckPolicy:     jetstream.AckExplicitPolicy,
+				AckWait:       30 * time.Second,
+				MaxDeliver:    5,
+				MaxAckPending: 1000,
+				FilterSubject: "orders.created",
+				DeliverPolicy: jetstream.DeliverAllPolicy,
+				MaxWaiting:    512,
 			},
 		},
 		{
@@ -324,6 +332,18 @@ func seedMessages(ctx context.Context, js jetstream.JetStream, nc *nats.Conn) {
 		})
 	}
 
+	// Audit — second subject on the EVENTS stream that does NOT start with
+	// "events.". Watching the EVENTS stream should surface these alongside
+	// the events.* messages; the old single-subject watch missed them.
+	auditActions := []string{"login", "logout", "permission.grant", "permission.revoke", "config.change"}
+	for i := 0; i < 80; i++ {
+		action := auditActions[rand.Intn(len(auditActions))]
+		messages = append(messages, msg{
+			subject: fmt.Sprintf("audit.%s", action),
+			data:    fmt.Sprintf(`{"action":"%s","actor":"admin-%03d","target":"usr-%05d","ip":"10.0.%d.%d","result":"%s"}`, action, rand.Intn(50), rand.Intn(10000), rand.Intn(256), rand.Intn(256), []string{"allow", "deny"}[rand.Intn(2)]),
+		})
+	}
+
 	// Logs
 	for i := 0; i < 500; i++ {
 		level := levels[rand.Intn(len(levels))]
@@ -367,7 +387,22 @@ func seedMessages(ctx context.Context, js jetstream.JetStream, nc *nats.Conn) {
 		}
 		published++
 	}
-	fmt.Printf("published %d messages across all streams\n", published)
+	fmt.Printf("published %d JetStream messages across all streams\n", published)
+
+	// Publish core NATS messages (no JetStream required)
+	corePublished := 0
+	coreSubjects := []string{"ping", "status.api", "status.worker", "chat.general", "chat.random", "telemetry.heartbeat"}
+	for i := 0; i < 100; i++ {
+		subj := coreSubjects[rand.Intn(len(coreSubjects))]
+		data := fmt.Sprintf(`{"ts":"%s","seq":%d,"source":"seeder"}`, time.Now().Format(time.RFC3339Nano), i)
+		if err := nc.Publish(subj, []byte(data)); err != nil {
+			log.Printf("core publish %s: %v", subj, err)
+			continue
+		}
+		corePublished++
+	}
+	_ = nc.Flush()
+	fmt.Printf("published %d core NATS messages\n", corePublished)
 
 	// Consume some messages to create realistic ack/pending state
 	simulateConsumption(ctx, js)
@@ -382,12 +417,12 @@ func simulateConsumption(ctx context.Context, js jetstream.JetStream) {
 	}{
 		{"ORDERS", "order-processor", 120, 0.9},     // moderate lag
 		{"ORDERS", "order-analytics", 30, 0.5},      // high lag — barely consuming
-		{"ORDERS", "order-notifications", 0, 0},      // no consumption — max lag
-		{"EVENTS", "event-handler", 200, 0.85},       // moderate lag
-		{"EVENTS", "event-archiver", 50, 0.3},        // very high lag — slow archiver
-		{"LOGS", "log-indexer", 300, 0.7},             // moderate lag
-		{"LOGS", "log-alerts", 0, 0},                  // zero — watches new only
-		{"METRICS", "metrics-aggregator", 100, 0.4},  // high lag — overwhelmed
+		{"ORDERS", "order-notifications", 0, 0},     // no consumption — max lag
+		{"EVENTS", "event-handler", 200, 0.85},      // moderate lag
+		{"EVENTS", "event-archiver", 50, 0.3},       // very high lag — slow archiver
+		{"LOGS", "log-indexer", 300, 0.7},           // moderate lag
+		{"LOGS", "log-alerts", 0, 0},                // zero — watches new only
+		{"METRICS", "metrics-aggregator", 100, 0.4}, // high lag — overwhelmed
 	}
 
 	for _, c := range consume {
@@ -794,10 +829,10 @@ func runLivePublisher(nc *nats.Conn, js jetstream.JetStream, baseRate time.Durat
 	startTime := time.Now()
 
 	// Throughput control — changes every phaseLen messages
-	phaseLen := 50 + rand.Intn(100)       // messages per phase
-	phaseCount := 0                         // messages in current phase
-	rateMultiplier := 1.0                   // current rate multiplier
-	burstRemaining := 0                     // messages left in a burst (no delay)
+	phaseLen := 50 + rand.Intn(100) // messages per phase
+	phaseCount := 0                 // messages in current phase
+	rateMultiplier := 1.0           // current rate multiplier
+	burstRemaining := 0             // messages left in a burst (no delay)
 
 	// Pick a new traffic phase
 	nextPhase := func() {
@@ -845,43 +880,62 @@ func runLivePublisher(nc *nats.Conn, js jetstream.JetStream, baseRate time.Durat
 		var subject, data string
 		now := time.Now().Format(time.RFC3339Nano)
 
-		// Rotate through different message types
-		switch rand.Intn(5) {
-		case 0: // Order
+		// Rotate through different message types — cases 0-4 are JetStream,
+		// cases 5-6 are core NATS (no stream required).
+		useCore := false
+		switch rand.Intn(7) {
+		case 0: // Order (JS)
 			status := statuses[rand.Intn(len(statuses))]
 			region := regions[rand.Intn(len(regions))]
 			subject = fmt.Sprintf("orders.%s", status)
 			data = fmt.Sprintf(`{"ts":"%s","order_id":"ORD-%06d","status":"%s","region":"%s","amount":%.2f}`,
 				now, rand.Intn(999999), status, region, rand.Float64()*500+5)
 
-		case 1: // Event
+		case 1: // Event (JS)
 			evt := eventTypes[rand.Intn(len(eventTypes))]
 			subject = fmt.Sprintf("events.%s", evt)
 			data = fmt.Sprintf(`{"ts":"%s","event":"%s","user_id":"usr-%05d","session":"%08x"}`,
 				now, evt, rand.Intn(10000), rand.Uint32())
 
-		case 2: // Log
+		case 2: // Log (JS)
 			level := levels[rand.Intn(len(levels))]
 			svc := services[rand.Intn(len(services))]
 			subject = fmt.Sprintf("logs.%s.%s", level, svc)
 			data = fmt.Sprintf(`{"ts":"%s","level":"%s","service":"%s","msg":"Request processed","trace":"%08x"}`,
 				now, level, svc, rand.Uint32())
 
-		case 3: // Metric
+		case 3: // Metric (JS)
 			metric := metricNames[rand.Intn(len(metricNames))]
 			host := fmt.Sprintf("host-%02d", rand.Intn(10))
 			subject = fmt.Sprintf("metrics.%s.%s", host, metric)
 			data = fmt.Sprintf(`{"ts":"%s","metric":"%s","host":"%s","value":%.2f}`,
 				now, metric, host, rand.Float64()*100)
 
-		case 4: // Notification
+		case 4: // Notification (JS)
 			ch := channels[rand.Intn(len(channels))]
 			subject = fmt.Sprintf("notify.%s", ch)
 			data = fmt.Sprintf(`{"ts":"%s","channel":"%s","recipient":"user-%04d","priority":"%s"}`,
 				now, ch, rand.Intn(5000), []string{"low", "normal", "high"}[rand.Intn(3)])
+
+		case 5: // Heartbeat / status (core NATS)
+			useCore = true
+			coreSubjects := []string{"ping", "status.api", "status.worker", "telemetry.heartbeat"}
+			subject = coreSubjects[rand.Intn(len(coreSubjects))]
+			data = fmt.Sprintf(`{"ts":"%s","source":"seeder","seq":%d}`, now, msgCount)
+
+		case 6: // Chat (core NATS)
+			useCore = true
+			rooms := []string{"general", "random", "dev", "ops"}
+			subject = fmt.Sprintf("chat.%s", rooms[rand.Intn(len(rooms))])
+			data = fmt.Sprintf(`{"ts":"%s","user":"bot-%02d","text":"message #%d"}`, now, rand.Intn(10), msgCount)
 		}
 
-		if _, err := js.Publish(ctx, subject, []byte(data)); err != nil {
+		if useCore {
+			if err := nc.Publish(subject, []byte(data)); err != nil {
+				log.Printf("publish error: %v", err)
+				continue
+			}
+		} else if _, err := js.Publish(ctx, subject, []byte(data)); err != nil {
 			log.Printf("publish error: %v", err)
 			continue
 		}

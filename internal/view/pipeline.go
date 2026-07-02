@@ -739,4 +739,3 @@ func evaluateJSONPathOrPipeline(data []byte, expr string) (string, error) {
 	}
 	return evaluateJSONPath(data, expr)
 }
-

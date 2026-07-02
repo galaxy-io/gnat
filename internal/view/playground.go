@@ -10,12 +10,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/atterpac/gnat/internal/nats"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
+	"github.com/galaxy-io/gnat/internal/nats"
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 )
 
 const playgroundMaxMessages = 500
@@ -35,14 +35,14 @@ type Playground struct {
 	app *App
 
 	// Publisher pane
-	pubSubject *tview.InputField
-	pubPayload *tview.TextArea
-	pubHeaderK *tview.InputField
-	pubHeaderV *tview.InputField
+	pubSubject *components.TextField
+	pubPayload *components.TextArea
+	pubHeaderK *components.TextField
+	pubHeaderV *components.TextField
 
 	// Subscriber pane
 	subTable   *components.Table
-	subPreview *tview.TextView
+	subPreview *core.TextView
 	subDetail  *components.MasterDetailView
 
 	// State
@@ -54,62 +54,51 @@ type Playground struct {
 	gen     int64
 	useJS   bool
 
-	stopProcess chan struct{}
-	stopped     int32
+	processCancel context.CancelFunc
+	stopped       int32
 
 	// Focus cycling
-	focusItems []tview.Primitive
+	focusItems []core.Widget
 	focusIdx   int
 }
 
 func NewPlayground(app *App) *Playground {
 	pg := &Playground{
-		app:         app,
-		useJS:       true,
-		stopProcess: make(chan struct{}),
+		app:           app,
+		useJS:         true,
+		processCancel: func() {},
 	}
 
 	// Publisher inputs
-	pg.pubSubject = tview.NewInputField().
+	pg.pubSubject = components.NewTextField("subject").
 		SetLabel("Subject: ").
-		SetFieldWidth(0).
 		SetPlaceholder("orders.new")
 	pg.pubSubject.SetBackgroundColor(theme.Bg())
-	pg.pubSubject.SetFieldBackgroundColor(theme.Bg())
-	theme.Register(pg.pubSubject)
 
-	pg.pubPayload = tview.NewTextArea().
+	pg.pubPayload = components.NewTextArea("payload").
 		SetPlaceholder("message payload...")
 	pg.pubPayload.SetBackgroundColor(theme.Bg())
-	theme.Register(pg.pubPayload)
 
-	pg.pubHeaderK = tview.NewInputField().
+	pg.pubHeaderK = components.NewTextField("header_key").
 		SetLabel("Header: ").
-		SetFieldWidth(0).
 		SetPlaceholder("key")
 	pg.pubHeaderK.SetBackgroundColor(theme.Bg())
-	pg.pubHeaderK.SetFieldBackgroundColor(theme.Bg())
-	theme.Register(pg.pubHeaderK)
 
-	pg.pubHeaderV = tview.NewInputField().
+	pg.pubHeaderV = components.NewTextField("header_value").
 		SetLabel("= ").
-		SetFieldWidth(0).
 		SetPlaceholder("value")
 	pg.pubHeaderV.SetBackgroundColor(theme.Bg())
-	pg.pubHeaderV.SetFieldBackgroundColor(theme.Bg())
-	theme.Register(pg.pubHeaderV)
 
-	headerRow := tview.NewFlex().SetDirection(tview.FlexColumn).
+	headerRow := core.NewFlex().SetDirection(core.Row).
 		AddItem(pg.pubHeaderK, 0, 1, false).
 		AddItem(pg.pubHeaderV, 0, 1, false)
 	headerRow.SetBackgroundColor(theme.Bg())
 
-	pubFlex := tview.NewFlex().SetDirection(tview.FlexRow).
+	pubFlex := core.NewFlex().SetDirection(core.Column).
 		AddItem(pg.pubSubject, 1, 0, true).
 		AddItem(pg.pubPayload, 0, 1, false).
 		AddItem(headerRow, 1, 0, false)
 	pubFlex.SetBackgroundColor(theme.Bg())
-	theme.Register(pubFlex)
 	pubPanel := components.NewPanel().SetTitle("Publisher").SetContent(pubFlex)
 
 	// Subscriber
@@ -117,12 +106,11 @@ func NewPlayground(app *App) *Playground {
 		SetHeaders("TIME", "SUBJECT", "SIZE").
 		ConfigureEmpty(theme.IconSignal, "No Messages", "Publish to start")
 
-	pg.subPreview = tview.NewTextView().
+	pg.subPreview = core.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
-		SetWrap(true)
+		SetWordWrap(true)
 	pg.subPreview.SetBackgroundColor(theme.Bg())
-	theme.Register(pg.subPreview)
 
 	pg.subDetail = components.NewMasterDetailView().
 		SetMasterTitle("Subscriber").
@@ -143,7 +131,7 @@ func NewPlayground(app *App) *Playground {
 		SetLeft(pubPanel).
 		SetRight(subPanel)
 
-	pg.focusItems = []tview.Primitive{
+	pg.focusItems = []core.Widget{
 		pg.pubSubject, pg.pubPayload, pg.pubHeaderK, pg.pubHeaderV, pg.subTable,
 	}
 
@@ -152,10 +140,8 @@ func NewPlayground(app *App) *Playground {
 		pg.renderSubState(s)
 	})
 
-	pg.pubSubject.SetDoneFunc(func(key tcell.Key) {
-		if key == tcell.KeyEnter {
-			go pg.publish()
-		}
+	pg.pubSubject.SetOnSubmit(func(_ *components.SubmitEvent) {
+		go pg.publish()
 	})
 
 	return pg
@@ -174,10 +160,7 @@ func (pg *Playground) Start() {
 
 func (pg *Playground) Stop() {
 	atomic.StoreInt32(&pg.stopped, 1)
-	select {
-	case pg.stopProcess <- struct{}{}:
-	default:
-	}
+	pg.processCancel()
 	pg.doUnsubscribe()
 }
 
@@ -199,44 +182,42 @@ func (pg *Playground) Hints() []components.KeyHint {
 	return hints
 }
 
-func (pg *Playground) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return pg.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch {
-		case event.Key() == tcell.KeyCtrlS:
-			go pg.publish()
-			return
-		case event.Key() == tcell.KeyTab:
-			pg.focusIdx = (pg.focusIdx + 1) % len(pg.focusItems)
-			pg.app.app.SetFocus(pg.focusItems[pg.focusIdx])
-			return
-		case event.Key() == tcell.KeyBacktab:
-			pg.focusIdx--
-			if pg.focusIdx < 0 {
-				pg.focusIdx = len(pg.focusItems) - 1
-			}
-			pg.app.app.SetFocus(pg.focusItems[pg.focusIdx])
-			return
-		case event.Rune() == 'u' && !pg.isTextInputFocused():
-			go pg.unsubscribe()
-			return
-		case event.Rune() == 'c' && !pg.isTextInputFocused():
-			go pg.clearMessages()
-			return
-		case event.Rune() == 'm' && !pg.isTextInputFocused():
-			go pg.toggleMode()
-			return
+func (pg *Playground) HandleKey(event *tcell.EventKey) bool {
+	switch {
+	case event.Key() == tcell.KeyCtrlS:
+		go pg.publish()
+		return true
+	case event.Key() == tcell.KeyTab:
+		pg.focusIdx = (pg.focusIdx + 1) % len(pg.focusItems)
+		pg.app.app.SetFocus(pg.focusItems[pg.focusIdx])
+		return true
+	case event.Key() == tcell.KeyBacktab:
+		pg.focusIdx--
+		if pg.focusIdx < 0 {
+			pg.focusIdx = len(pg.focusItems) - 1
 		}
+		pg.app.app.SetFocus(pg.focusItems[pg.focusIdx])
+		return true
+	case event.Rune() == 'u' && !pg.isTextInputFocused():
+		go pg.unsubscribe()
+		return true
+	case event.Rune() == 'c' && !pg.isTextInputFocused():
+		go pg.clearMessages()
+		return true
+	case event.Rune() == 'm' && !pg.isTextInputFocused():
+		go pg.toggleMode()
+		return true
+	}
 
-		// Delegate to focused primitive
-		focused := pg.focusItems[pg.focusIdx]
-		if handler := focused.InputHandler(); handler != nil {
-			handler(event, setFocus)
-		}
-	})
+	focused := pg.focusItems[pg.focusIdx]
+	if handler, ok := focused.(core.KeyHandler); ok {
+		return handler.HandleKey(event)
+	}
+	return pg.Split.HandleKey(event)
 }
 
 func (pg *Playground) publish() {
-	subject := pg.pubSubject.GetText()
+	subject := pg.pubSubject.GetValue()
 	if subject == "" {
 		pg.app.ShowWarning("Subject is required")
 		return
@@ -244,8 +225,8 @@ func (pg *Playground) publish() {
 
 	payload := pg.pubPayload.GetText()
 	headers := make(map[string][]string)
-	hk := pg.pubHeaderK.GetText()
-	hv := pg.pubHeaderV.GetText()
+	hk := pg.pubHeaderK.GetValue()
+	hv := pg.pubHeaderV.GetValue()
 	if hk != "" {
 		headers[hk] = []string{hv}
 	}
@@ -295,7 +276,9 @@ func (pg *Playground) subscribe(subject string) {
 	useJS := pg.useJS
 	pg.mu.Unlock()
 
-	go pg.processMessages(myGen, msgChan, subject)
+	processCtx, processCancel := context.WithCancel(context.Background())
+	pg.processCancel = processCancel
+	go pg.processMessages(processCtx, myGen, msgChan, subject)
 
 	handler := func(msg nats.LiveMessage) {
 		if atomic.LoadInt32(&pg.stopped) == 1 {
@@ -348,7 +331,7 @@ func (pg *Playground) subscribe(subject string) {
 	})
 }
 
-func (pg *Playground) processMessages(myGen int64, msgChan chan nats.LiveMessage, subject string) {
+func (pg *Playground) processMessages(ctx context.Context, myGen int64, msgChan chan nats.LiveMessage, subject string) {
 	var messages []nats.LiveMessage
 	batchDone := false
 
@@ -390,7 +373,7 @@ func (pg *Playground) processMessages(myGen int64, msgChan chan nats.LiveMessage
 
 	for {
 		select {
-		case <-pg.stopProcess:
+		case <-ctx.Done():
 			return
 		case msg, ok := <-msgChan:
 			if !ok {
@@ -430,11 +413,7 @@ func (pg *Playground) doUnsubscribe() {
 	pg.gen++
 	pg.mu.Unlock()
 
-	select {
-	case pg.stopProcess <- struct{}{}:
-	default:
-	}
-	pg.stopProcess = make(chan struct{})
+	pg.processCancel()
 
 	if sub != nil {
 		_ = sub.Unsubscribe()
@@ -562,5 +541,5 @@ func (pg *Playground) renderSubPreview(displayIdx int) {
 	b.WriteString(data)
 
 	pg.subPreview.SetText(b.String())
-	pg.subPreview.ScrollToBeginning()
+	pg.subPreview.ScrollTo(0, 0)
 }

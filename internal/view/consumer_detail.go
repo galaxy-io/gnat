@@ -8,13 +8,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/atterpac/gnat/internal/clipboard"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
+	"github.com/galaxy-io/gnat/internal/clipboard"
 	"github.com/gdamore/tcell/v2"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/rivo/tview"
 )
 
 // ConsumerDetail shows full config and metrics for a single consumer.
@@ -24,12 +24,12 @@ type ConsumerDetail struct {
 	streamName   string
 	consumerName string
 
-	configView  *tview.TextView
-	metricsView *tview.TextView
+	configView  *core.TextView
+	metricsView *core.TextView
 
-	info        *binding.Value[*jetstream.ConsumerInfo]
-	stopRefresh chan struct{}
-	stopped     int32
+	info          *binding.Value[*jetstream.ConsumerInfo]
+	refreshCancel context.CancelFunc
+	stopped       int32
 
 	// For rate calculation
 	lastDelivered uint64
@@ -47,19 +47,17 @@ type ConsumerDetail struct {
 // NewConsumerDetail creates the consumer detail view.
 func NewConsumerDetail(app *App, streamName, consumerName string) *ConsumerDetail {
 	cd := &ConsumerDetail{
-		app:          app,
-		streamName:   streamName,
-		consumerName: consumerName,
-		stopRefresh:  make(chan struct{}, 1),
+		app:           app,
+		streamName:    streamName,
+		consumerName:  consumerName,
+		refreshCancel: func() {},
 	}
 
-	cd.configView = tview.NewTextView().SetDynamicColors(true)
+	cd.configView = core.NewTextView().SetDynamicColors(true)
 	cd.configView.SetBackgroundColor(theme.Get().Bg())
-	theme.Register(cd.configView)
 
-	cd.metricsView = tview.NewTextView().SetDynamicColors(true)
+	cd.metricsView = core.NewTextView().SetDynamicColors(true)
 	cd.metricsView.SetBackgroundColor(theme.Get().Bg())
-	theme.Register(cd.metricsView)
 
 	// Set up reactive binding for consumer info
 	cd.info = binding.NewValue[*jetstream.ConsumerInfo](nil)
@@ -91,14 +89,16 @@ func (cd *ConsumerDetail) Name() string { return cd.consumerName }
 
 func (cd *ConsumerDetail) Start() {
 	atomic.StoreInt32(&cd.stopped, 0)
-	cd.stopRefresh = make(chan struct{}, 1)
+	cd.refreshCancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cd.refreshCancel = cancel
 	go func() {
 		cd.loadInfo()
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-cd.stopRefresh:
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				cd.loadInfo()
@@ -109,10 +109,7 @@ func (cd *ConsumerDetail) Start() {
 
 func (cd *ConsumerDetail) Stop() {
 	atomic.StoreInt32(&cd.stopped, 1)
-	select {
-	case cd.stopRefresh <- struct{}{}:
-	default:
-	}
+	cd.refreshCancel()
 }
 
 func (cd *ConsumerDetail) Hints() []components.KeyHint {
@@ -125,41 +122,44 @@ func (cd *ConsumerDetail) Hints() []components.KeyHint {
 	}
 }
 
-func (cd *ConsumerDetail) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return cd.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch event.Rune() {
-		case 'e':
-			if info := cd.info.Get(); info != nil {
-				showConsumerEditForm(cd.app, cd.streamName, info, func() {
-					go cd.loadInfo()
-				})
-			}
-		case 'y':
-			if info := cd.info.Get(); info != nil {
-				data, err := json.MarshalIndent(info, "", "  ")
-				if err != nil {
-					cd.app.ShowError(err.Error())
-				} else if err := clipboard.Copy(string(data)); err != nil {
-					cd.app.ShowError("Clipboard: " + err.Error())
-				} else {
-					cd.app.ShowSuccess("Copied consumer info: " + cd.consumerName)
-				}
-			}
-		case 'x':
-			if info := cd.info.Get(); info != nil {
-				data, err := json.MarshalIndent(info.Config, "", "  ")
-				if err != nil {
-					cd.app.ShowError(err.Error())
-				} else if err := clipboard.Copy(string(data)); err != nil {
-					cd.app.ShowError("Clipboard: " + err.Error())
-				} else {
-					cd.app.ShowSuccess("Exported consumer config to clipboard")
-				}
-			}
-		case 'r':
-			cd.loadInfo()
+func (cd *ConsumerDetail) HandleKey(event *tcell.EventKey) bool {
+	switch event.Rune() {
+	case 'e':
+		if info := cd.info.Get(); info != nil {
+			showConsumerEditForm(cd.app, cd.streamName, info, func() {
+				go cd.loadInfo()
+			})
 		}
-	})
+		return true
+	case 'y':
+		if info := cd.info.Get(); info != nil {
+			data, err := json.MarshalIndent(info, "", "  ")
+			if err != nil {
+				cd.app.ShowError(err.Error())
+			} else if err := clipboard.Copy(string(data)); err != nil {
+				cd.app.ShowError("Clipboard: " + err.Error())
+			} else {
+				cd.app.ShowSuccess("Copied consumer info: " + cd.consumerName)
+			}
+		}
+		return true
+	case 'x':
+		if info := cd.info.Get(); info != nil {
+			data, err := json.MarshalIndent(info.Config, "", "  ")
+			if err != nil {
+				cd.app.ShowError(err.Error())
+			} else if err := clipboard.Copy(string(data)); err != nil {
+				cd.app.ShowError("Clipboard: " + err.Error())
+			} else {
+				cd.app.ShowSuccess("Exported consumer config to clipboard")
+			}
+		}
+		return true
+	case 'r':
+		cd.loadInfo()
+		return true
+	}
+	return cd.Split.HandleKey(event)
 }
 
 func (cd *ConsumerDetail) loadInfo() {

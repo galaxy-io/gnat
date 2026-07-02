@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/atterpac/gnat/internal/config"
+	"github.com/galaxy-io/gnat/internal/config"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -44,6 +44,9 @@ type Provider interface {
 	ServerURL() string
 	Reconnect(ctx context.Context, cfg config.ConnectionConfig) error
 
+	// JetStream availability
+	JetStreamEnabled(ctx context.Context) bool
+
 	// Account
 	AccountInfo(ctx context.Context) (*jetstream.AccountInfo, error)
 
@@ -63,6 +66,7 @@ type Provider interface {
 	PurgeStreamSubject(ctx context.Context, name, subject string) error
 	GetMessage(ctx context.Context, streamName string, seq uint64) (*RawMessage, error)
 	GetLastMessageForSubject(ctx context.Context, streamName, subject string) (*RawMessage, error)
+	GetRecentMessagesForSubject(ctx context.Context, streamName, subject string, maxBytes, maxMsgs int) ([]*RawMessage, error)
 	DeleteMessage(ctx context.Context, streamName string, seq uint64) error
 
 	// Consumers
@@ -94,6 +98,7 @@ type Provider interface {
 
 	// Advisories
 	SubscribeAdvisories(ctx context.Context, handler func(Advisory)) error
+	UnsubscribeAdvisories()
 
 	// Publishing
 	Publish(ctx context.Context, subject string, data []byte, headers map[string][]string) error
@@ -103,6 +108,9 @@ type Provider interface {
 
 	// JetStream subscription with replay capability
 	SubscribeJetStream(ctx context.Context, subject string, policy DeliverPolicy, handler func(LiveMessage)) (Subscription, error)
+
+	// JetStream subscription over an entire stream (no subject filter — all subjects)
+	SubscribeJetStreamStream(ctx context.Context, streamName string, policy DeliverPolicy, handler func(LiveMessage)) (Subscription, error)
 }
 
 // ConnectionStats holds basic connection statistics.
@@ -147,7 +155,7 @@ const (
 type KVWatchEvent struct {
 	Key       string
 	Operation string // "PUT", "DELETE", "PURGE"
-	Value     []byte
+	ValueSize int
 	Revision  uint64
 	Timestamp time.Time
 }

@@ -7,13 +7,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/atterpac/gnat/internal/clipboard"
-	"github.com/atterpac/jig/binding"
-	"github.com/atterpac/jig/components"
-	"github.com/atterpac/jig/theme"
+	"github.com/atterpac/dado/binding"
+	"github.com/atterpac/dado/components"
+	"github.com/atterpac/dado/core"
+	"github.com/atterpac/dado/theme"
+	"github.com/galaxy-io/gnat/internal/clipboard"
 	"github.com/gdamore/tcell/v2"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/rivo/tview"
 )
 
 // StreamList displays all JetStream streams in a master-detail layout.
@@ -22,7 +22,7 @@ type StreamList struct {
 	app *App
 
 	table   *components.Table
-	preview *tview.TextView
+	preview *core.TextView
 
 	binding *binding.TableBinding[*jetstream.StreamInfo]
 
@@ -45,11 +45,12 @@ func NewStreamList(app *App) *StreamList {
 
 	sl.table = components.NewTable().
 		SetHeaders("NAME", "MSGS", "BYTES", "CONSUMERS", "STORAGE", "REPLICAS").
+		SetMultiSelect(true).
 		ConfigureEmpty(theme.IconDatabase, "No Streams", "")
 
-	sl.preview = tview.NewTextView().
+	sl.preview = core.NewTextView().
 		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft)
+		SetTextAlign(core.AlignLeft)
 
 	// Set up reactive table binding
 	sl.binding = binding.NewTableBinding[*jetstream.StreamInfo](sl.table).
@@ -84,10 +85,8 @@ func NewStreamList(app *App) *StreamList {
 		}).
 		SetRefreshInterval(10 * time.Second).
 		SetOnSelect(func(s *jetstream.StreamInfo) {
-			// Enter opens watch view directly
-			if len(s.Config.Subjects) > 0 {
-				sl.app.NavigateToMessageMonitorWithSubject(s.Config.Subjects[0])
-			}
+			// Enter opens watch view directly — watch the whole stream.
+			sl.app.NavigateToMessageMonitorForStream(s.Config.Name)
 		}).
 		SetOnRefresh(func(data []*jetstream.StreamInfo, err error) {
 			if err != nil {
@@ -126,9 +125,19 @@ func NewStreamList(app *App) *StreamList {
 			}
 			sl.prevMsgs = make(map[string]uint64)
 			sl.prevBytes = make(map[string]uint64)
+			current := make(map[string]struct{}, len(data))
 			for _, s := range data {
 				sl.prevMsgs[s.Config.Name] = s.State.Msgs
 				sl.prevBytes[s.Config.Name] = s.State.Bytes
+				current[s.Config.Name] = struct{}{}
+			}
+			// Prune history for deleted streams.
+			for name := range sl.msgRateHistory {
+				if _, ok := current[name]; !ok {
+					delete(sl.msgRateHistory, name)
+					delete(sl.byteRateHistory, name)
+					delete(sl.rates, name)
+				}
 			}
 			sl.prevTime = now
 			sl.app.QueueUpdateDraw(func() {
@@ -180,93 +189,97 @@ func (sl *StreamList) Hints() []components.KeyHint {
 		{Key: "d", Description: "Delete"},
 		{Key: "Space", Description: "Select"},
 		{Key: "D", Description: "Bulk Delete"},
-		{Key: "P", Description: "Bulk Purge"},
+		{Key: "X", Description: "Bulk Purge"},
 		{Key: "y", Description: "Yank"},
 		{Key: "p", Description: "Preview"},
 		{Key: "r", Description: "Refresh"},
 	}
 }
 
-func (sl *StreamList) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return sl.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-		switch {
-		case event.Key() == tcell.KeyEnter:
-			// Watch messages directly
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				if len(s.Config.Subjects) > 0 {
-					sl.app.NavigateToMessageMonitorWithSubject(s.Config.Subjects[0])
-				}
-			}
-		case event.Rune() == 'v':
-			// View stream detail
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				sl.app.NavigateToStreamDetail(s.Config.Name)
-			}
-		case event.Rune() == 'n':
-			// View consumers
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				sl.app.NavigateToConsumers(s.Config.Name)
-			}
-		case event.Rune() == 'b':
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				sl.app.NavigateToMessageBrowser(s.Config.Name)
-			}
-		case event.Rune() == 'c':
-			showStreamCreateForm(sl.app, func() {
+func (sl *StreamList) HandleKey(event *tcell.EventKey) bool {
+	switch {
+	case event.Key() == tcell.KeyEnter:
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			sl.app.NavigateToMessageMonitorForStream(s.Config.Name)
+		}
+		return true
+	case event.Rune() == 'v':
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			sl.app.NavigateToStreamDetail(s.Config.Name)
+		}
+		return true
+	case event.Rune() == 'n':
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			sl.app.NavigateToConsumers(s.Config.Name)
+		}
+		return true
+	case event.Rune() == 'b':
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			sl.app.NavigateToMessageBrowser(s.Config.Name)
+		}
+		return true
+	case event.Rune() == 'c':
+		showStreamCreateForm(sl.app, func() {
+			sl.binding.RefreshAsync()
+		})
+		return true
+	case event.Rune() == 'd':
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			name := s.Config.Name
+			ConfirmDelete(sl.app, "stream", name, func() {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if err := sl.app.Provider().DeleteStream(ctx, name); err != nil {
+						sl.app.ShowError(err.Error())
+					} else {
+						sl.app.ShowSuccess("Deleted stream: " + name)
+						sl.binding.RefreshAsync()
+					}
+				}()
+			})
+		}
+		return true
+	case event.Rune() == 'e':
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			showStreamEditForm(sl.app, s, func() {
 				sl.binding.RefreshAsync()
 			})
-		case event.Rune() == 'd':
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				name := s.Config.Name
-				ConfirmDelete(sl.app, "stream", name, func() {
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-						defer cancel()
-						if err := sl.app.Provider().DeleteStream(ctx, name); err != nil {
-							sl.app.ShowError(err.Error())
-						} else {
-							sl.app.ShowSuccess("Deleted stream: " + name)
-							sl.binding.RefreshAsync()
-						}
-					}()
-				})
-			}
-		case event.Rune() == 'e':
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				showStreamEditForm(sl.app, s, func() {
-					sl.binding.RefreshAsync()
-				})
-			}
-		case event.Rune() == 'y':
-			if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-				data, err := json.MarshalIndent(s.Config, "", "  ")
-				if err != nil {
-					sl.app.ShowError(err.Error())
-				} else if err := clipboard.Copy(string(data)); err != nil {
-					sl.app.ShowError("Clipboard: " + err.Error())
-				} else {
-					sl.app.ShowSuccess("Copied stream config: " + s.Config.Name)
-				}
-			}
-		case event.Rune() == 'D':
-			sl.bulkDelete()
-		case event.Rune() == 'P' && event.Modifiers() == 0:
-			sl.bulkPurge()
-		case event.Rune() == 'p':
-			sl.ToggleDetail()
-		case event.Rune() == 'r':
-			sl.binding.RefreshAsync()
-		case event.Rune() == '/':
-			sl.ShowSearch()
-		default:
-			if sl.HandleSearchKey(event) {
-				return
-			}
-			if handler := sl.MasterDetailView.InputHandler(); handler != nil {
-				handler(event, setFocus)
+		}
+		return true
+	case event.Rune() == 'y':
+		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
+			data, err := json.MarshalIndent(s.Config, "", "  ")
+			if err != nil {
+				sl.app.ShowError(err.Error())
+			} else if err := clipboard.Copy(string(data)); err != nil {
+				sl.app.ShowError("Clipboard: " + err.Error())
+			} else {
+				sl.app.ShowSuccess("Copied stream config: " + s.Config.Name)
 			}
 		}
-	})
+		return true
+	case event.Rune() == 'D':
+		sl.bulkDelete()
+		return true
+	case event.Rune() == 'X' && event.Modifiers() == 0:
+		sl.bulkPurge()
+		return true
+	case event.Rune() == 'p':
+		sl.ToggleDetail()
+		return true
+	case event.Rune() == 'r':
+		sl.binding.RefreshAsync()
+		return true
+	case event.Rune() == '/':
+		sl.ShowSearch()
+		return true
+	}
+
+	if sl.HandleSearchKey(event) {
+		return true
+	}
+	return sl.MasterDetailView.HandleKey(event)
 }
 
 func (sl *StreamList) updatePreview(row int) {
@@ -414,15 +427,14 @@ func (sl *StreamList) updatePreview(row int) {
 	sl.preview.SetText(b.String())
 }
 
-
 func (sl *StreamList) bulkDelete() {
 	keys := sl.table.GetSelectedKeys()
 	if len(keys) == 0 {
 		sl.app.ShowInfo("No streams selected (use Space to select)")
 		return
 	}
-	label := fmt.Sprintf("%d streams", len(keys))
-	ConfirmDelete(sl.app, "bulk", label, func() {
+	msg := fmt.Sprintf("Delete %d selected stream(s)? This cannot be undone.", len(keys))
+	Confirm(sl.app, "Bulk Delete Streams", msg, func() {
 		go func() {
 			for _, name := range keys {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -444,8 +456,8 @@ func (sl *StreamList) bulkPurge() {
 		sl.app.ShowInfo("No streams selected (use Space to select)")
 		return
 	}
-	label := fmt.Sprintf("%d streams", len(keys))
-	ConfirmDelete(sl.app, "purge", label, func() {
+	msg := fmt.Sprintf("Purge all messages from %d selected stream(s)? This cannot be undone.", len(keys))
+	Confirm(sl.app, "Bulk Purge Streams", msg, func() {
 		go func() {
 			for _, name := range keys {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
