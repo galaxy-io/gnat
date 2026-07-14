@@ -59,7 +59,7 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Formula
     homepage: "https://github.com/galaxy-io/gnat"
-    description: "Terminal UI for NATS JetStream management"
+    description: "TUI Client for NATS"
     license: "MIT"
     install: |
       bin.install "gnat"
