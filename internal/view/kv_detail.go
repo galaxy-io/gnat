@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -28,6 +29,8 @@ type KVDetail struct {
 
 	kv      jetstream.KeyValue
 	binding *binding.TableBinding[string]
+	keys    []string
+	alpha   bool
 
 	refreshCancel context.CancelFunc
 	stopped       int32
@@ -39,6 +42,7 @@ func NewKVDetail(app *App, bucket string) *KVDetail {
 		app:           app,
 		bucket:        bucket,
 		refreshCancel: func() {},
+		alpha:         true,
 	}
 
 	kd.keyTable = components.NewTable().SetHeaders("KEY").
@@ -110,6 +114,7 @@ func (kd *KVDetail) Hints() []components.KeyHint {
 		{Key: "e", Description: "Edit"},
 		{Key: "d", Description: "Delete"},
 		{Key: "w", Description: "Watch"},
+		{Key: "s", Description: "Toggle sort"},
 		{Key: "p", Description: "Preview"},
 		{Key: "r", Description: "Refresh"},
 	}
@@ -134,6 +139,10 @@ func (kd *KVDetail) HandleKey(event *tcell.EventKey) bool {
 		return true
 	case 'w':
 		kd.app.NavigateToKVWatch(kd.bucket)
+		return true
+	case 's':
+		kd.alpha = !kd.alpha
+		kd.applyKeyOrder()
 		return true
 	case 'd':
 		kd.deleteKey()
@@ -205,13 +214,31 @@ func (kd *KVDetail) loadKeys() {
 			return
 		}
 
-		kd.binding.SetData(keys)
 		kd.app.QueueUpdateDraw(func() {
+			kd.keys = append(kd.keys[:0], keys...)
+			kd.applyKeyOrder()
 			if len(keys) > 0 {
 				kd.loadValue(1)
 			}
 		})
 	}()
+}
+
+func (kd *KVDetail) applyKeyOrder() {
+	kd.binding.SetData(orderKVKeys(kd.keys, kd.alpha))
+	if kd.alpha {
+		kd.keyTable.SetHeaders("KEY (A-Z)")
+		return
+	}
+	kd.keyTable.SetHeaders("KEY (SOURCE)")
+}
+
+func orderKVKeys(keys []string, alpha bool) []string {
+	ordered := append([]string(nil), keys...)
+	if alpha {
+		sort.Strings(ordered)
+	}
+	return ordered
 }
 
 func (kd *KVDetail) loadValue(row int) {
