@@ -117,6 +117,9 @@ func (mb *MessageBrowser) Hints() []components.KeyHint {
 }
 
 func (mb *MessageBrowser) HandleKey(event *tcell.EventKey) bool {
+	if handleTextViewScroll(mb.preview, event) {
+		return true
+	}
 	if event.Key() == tcell.KeyEscape {
 		if mb.pipeline != nil {
 			mb.pipeline = nil
@@ -447,7 +450,7 @@ func (mb *MessageBrowser) renderPreview(row int) {
 			fmt.Fprintf(&b, "\n[%s]Payload:[-]\n", dim)
 		} else {
 			fmt.Fprintf(&b, "\n[%s]Result:[-]\n", dim)
-			result = strings.ReplaceAll(result, "[", "[[")
+			result = escapeDynamicText(result)
 			b.WriteString(result)
 
 			mb.preview.SetText(b.String())
@@ -465,7 +468,7 @@ func (mb *MessageBrowser) renderPreview(row int) {
 			fmt.Fprintf(&b, "\n[%s]Payload:[-]\n", dim)
 		} else {
 			fmt.Fprintf(&b, "\n[%s]Result:[-]\n", dim)
-			result = strings.ReplaceAll(result, "[", "[[")
+			result = escapeDynamicText(result)
 			b.WriteString(result)
 
 			mb.preview.SetText(b.String())
@@ -482,7 +485,7 @@ func (mb *MessageBrowser) renderPreview(row int) {
 			data = prettyJSON.String()
 		}
 	}
-	data = strings.ReplaceAll(data, "[", "[[")
+	data = escapeDynamicText(data)
 	b.WriteString(data)
 
 	mb.preview.SetText(b.String())

@@ -11,8 +11,8 @@ import (
 	"github.com/atterpac/dado/core"
 	"github.com/atterpac/dado/theme"
 	"github.com/galaxy-io/gnat/internal/clipboard"
+	"github.com/galaxy-io/gnat/internal/nats"
 	"github.com/gdamore/tcell/v2"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // KVList displays all Key-Value store buckets.
@@ -23,7 +23,7 @@ type KVList struct {
 	table   *components.Table
 	preview *core.TextView
 
-	binding *binding.TableBinding[jetstream.KeyValueStatus]
+	binding *binding.TableBinding[nats.KeyValueStoreStatus]
 }
 
 // NewKVList creates the KV bucket list view.
@@ -41,8 +41,8 @@ func NewKVList(app *App) *KVList {
 		SetDynamicColors(true)
 
 	// Set up reactive table binding
-	kl.binding = binding.NewTableBinding[jetstream.KeyValueStatus](kl.table).
-		SetMapper(func(s jetstream.KeyValueStatus) []string {
+	kl.binding = binding.NewTableBinding[nats.KeyValueStoreStatus](kl.table).
+		SetMapper(func(s nats.KeyValueStoreStatus) []string {
 			ttl := "-"
 			if s.TTL() > 0 {
 				ttl = s.TTL().String()
@@ -53,17 +53,17 @@ func NewKVList(app *App) *KVList {
 			}
 			return []string{
 				s.Bucket(),
-				formatNumber(s.Values()),
+				formatNumber(s.KeyCount),
 				formatBytes(s.Bytes()),
 				fmt.Sprintf("%d", s.History()),
 				ttl,
 				compressed,
 			}
 		}).
-		SetKeyMapper(func(s jetstream.KeyValueStatus) string {
+		SetKeyMapper(func(s nats.KeyValueStoreStatus) string {
 			return s.Bucket()
 		}).
-		SetFetcher(func() ([]jetstream.KeyValueStatus, error) {
+		SetFetcher(func() ([]nats.KeyValueStoreStatus, error) {
 			provider := kl.app.Provider()
 			if provider == nil {
 				return nil, fmt.Errorf("no provider")
@@ -73,10 +73,10 @@ func NewKVList(app *App) *KVList {
 			return provider.ListKeyValueStores(ctx)
 		}).
 		SetRefreshInterval(10 * time.Second).
-		SetOnSelect(func(s jetstream.KeyValueStatus) {
+		SetOnSelect(func(s nats.KeyValueStoreStatus) {
 			kl.app.NavigateToKVDetail(s.Bucket())
 		}).
-		SetOnRefresh(func(data []jetstream.KeyValueStatus, err error) {
+		SetOnRefresh(func(data []nats.KeyValueStoreStatus, err error) {
 			if err != nil {
 				kl.app.QueueUpdateDraw(func() {
 					kl.preview.SetText(fmt.Sprintf("[red]Error: %v[-]", err))
@@ -167,7 +167,7 @@ func (kl *KVList) HandleKey(event *tcell.EventKey) bool {
 		if s, ok := kl.binding.GetSelectedValue(); ok {
 			info := map[string]interface{}{
 				"bucket":     s.Bucket(),
-				"keys":       s.Values(),
+				"keys":       s.KeyCount,
 				"bytes":      s.Bytes(),
 				"history":    s.History(),
 				"ttl":        s.TTL().String(),
@@ -249,7 +249,7 @@ func (kl *KVList) updatePreview(row int) {
 		dim, s.History(),
 		dim, ttl,
 		dim, s.IsCompressed(),
-		dim, formatNumber(s.Values()),
+		dim, formatNumber(s.KeyCount),
 		dim, formatBytes(s.Bytes()),
 	)
 

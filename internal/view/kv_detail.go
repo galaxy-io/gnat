@@ -45,7 +45,8 @@ func NewKVDetail(app *App, bucket string) *KVDetail {
 		ConfigureEmpty(theme.IconKey, "No Keys", "")
 
 	kd.valueView = core.NewTextView().
-		SetDynamicColors(true)
+		SetDynamicColors(true).
+		SetScrollable(true)
 
 	// Set up reactive table binding for keys
 	kd.binding = binding.NewTableBinding[string](kd.keyTable).
@@ -115,6 +116,9 @@ func (kd *KVDetail) Hints() []components.KeyHint {
 }
 
 func (kd *KVDetail) HandleKey(event *tcell.EventKey) bool {
+	if handleTextViewScroll(kd.valueView, event) {
+		return true
+	}
 	switch event.Rune() {
 	case 'y':
 		kd.yankValue()
@@ -453,13 +457,14 @@ func (kd *KVDetail) showRevisionDiff(oldEntry, newEntry jetstream.KeyValueEntry)
 		SetDiff(oldVal, newVal).
 		SetTitle(fmt.Sprintf("Rev %d → %d", oldEntry.Revision(), newEntry.Revision())).
 		SetShowLineNumbers(true)
+	scrollableDiff := &scrollableDiffViewer{DiffViewer: diff}
 
 	modal := components.NewModal(components.ModalConfig{
 		Title:    fmt.Sprintf("Diff: Rev %d → %d", oldEntry.Revision(), newEntry.Revision()),
 		Width:    80,
 		Height:   24,
 		Backdrop: true,
-	}).SetContent(diff)
+	}).SetContent(scrollableDiff)
 
 	modal.SetHints([]components.KeyHint{
 		{Key: "j/k", Description: "Scroll"},
@@ -502,7 +507,7 @@ func (kd *KVDetail) renderValue(entry jetstream.KeyValueEntry) {
 		dim, entry.Created().Format(time.RFC3339),
 		dim, op,
 		dim,
-		value,
+		escapeDynamicText(value),
 	)
 
 	kd.valueView.SetText(text)

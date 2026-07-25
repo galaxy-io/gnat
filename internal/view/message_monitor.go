@@ -343,6 +343,9 @@ func (mm *MessageMonitor) Hints() []components.KeyHint {
 // etc.) are dispatched via `go` so they run outside the event loop.
 
 func (mm *MessageMonitor) HandleKey(event *tcell.EventKey) bool {
+	if handleTextViewScroll(mm.preview, event) {
+		return true
+	}
 	// Subject input has focus — delegate or escape
 	if mm.subjectInput.HasFocus() {
 		if event.Key() == tcell.KeyEscape {
@@ -844,7 +847,7 @@ func (mm *MessageMonitor) renderPreview(displayIdx int) {
 			fmt.Fprintf(&b, "\n[%s]Payload:[-]\n", dim)
 		} else {
 			fmt.Fprintf(&b, "\n[%s]Result:[-]\n", dim)
-			result = strings.ReplaceAll(result, "[", "[[")
+			result = escapeDynamicText(result)
 			b.WriteString(result)
 
 			mm.preview.SetText(b.String())
@@ -863,7 +866,7 @@ func (mm *MessageMonitor) renderPreview(displayIdx int) {
 			fmt.Fprintf(&b, "\n[%s]Payload:[-]\n", dim)
 		} else {
 			fmt.Fprintf(&b, "\n[%s]Result:[-]\n", dim)
-			result = strings.ReplaceAll(result, "[", "[[")
+			result = escapeDynamicText(result)
 			b.WriteString(result)
 
 			mm.preview.SetText(b.String())
@@ -883,7 +886,7 @@ func (mm *MessageMonitor) renderPreview(displayIdx int) {
 		}
 	}
 
-	data = strings.ReplaceAll(data, "[", "[[")
+	data = escapeDynamicText(data)
 	b.WriteString(data)
 
 	mm.preview.SetText(b.String())
