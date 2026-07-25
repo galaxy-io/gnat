@@ -25,6 +25,33 @@ func handleTextViewScroll(view *core.TextView, event *tcell.EventKey) bool {
 	return false
 }
 
+func handleMasterDetailPreview(layout *components.MasterDetailView, view *core.TextView, event *tcell.EventKey) bool {
+	switch event.Key() {
+	case tcell.KeyEnter:
+		if layout.IsMasterFocused() {
+			layout.FocusDetail()
+			layout.Blur()
+			layout.Focus()
+			return true
+		}
+	case tcell.KeyTab, tcell.KeyBacktab:
+		layout.ToggleFocus()
+		layout.Blur()
+		layout.Focus()
+		return true
+	}
+	if layout.IsMasterFocused() {
+		return false
+	}
+	switch event.Rune() {
+	case 'j':
+		return view.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, event.Modifiers()))
+	case 'k':
+		return view.HandleKey(tcell.NewEventKey(tcell.KeyUp, 0, event.Modifiers()))
+	}
+	return false
+}
+
 type scrollableDiffViewer struct {
 	*components.DiffViewer
 }

@@ -343,9 +343,6 @@ func (mm *MessageMonitor) Hints() []components.KeyHint {
 // etc.) are dispatched via `go` so they run outside the event loop.
 
 func (mm *MessageMonitor) HandleKey(event *tcell.EventKey) bool {
-	if handleTextViewScroll(mm.preview, event) {
-		return true
-	}
 	// Subject input has focus — delegate or escape
 	if mm.subjectInput.HasFocus() {
 		if event.Key() == tcell.KeyEscape {
@@ -353,6 +350,10 @@ func (mm *MessageMonitor) HandleKey(event *tcell.EventKey) bool {
 			return true
 		}
 		return mm.subjectInput.HandleKey(event)
+	}
+
+	if handleMasterDetailPreview(mm.MasterDetailView, mm.preview, event) {
+		return true
 	}
 
 	// Escape — clear pipeline first, then JSON filter, then search filter, then back-nav

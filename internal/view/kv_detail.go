@@ -78,6 +78,7 @@ func NewKVDetail(app *App, bucket string) *KVDetail {
 		SetMasterContent(kd.keyTable).
 		SetDetailContent(kd.valueView).
 		SetRatio(0.4)
+	kd.updatePaneHighlight()
 
 	return kd
 }
@@ -121,7 +122,8 @@ func (kd *KVDetail) Hints() []components.KeyHint {
 }
 
 func (kd *KVDetail) HandleKey(event *tcell.EventKey) bool {
-	if handleTextViewScroll(kd.valueView, event) {
+	if handleMasterDetailPreview(kd.MasterDetailView, kd.valueView, event) {
+		kd.updatePaneHighlight()
 		return true
 	}
 	switch event.Rune() {
@@ -155,6 +157,18 @@ func (kd *KVDetail) HandleKey(event *tcell.EventKey) bool {
 		return true
 	}
 	return kd.MasterDetailView.HandleKey(event)
+}
+
+func (kd *KVDetail) updatePaneHighlight() {
+	masterTitle := fmt.Sprintf("Keys: %s", kd.bucket)
+	detailTitle := "Value"
+	if kd.IsMasterFocused() {
+		masterTitle = "▶ " + masterTitle
+	} else {
+		detailTitle = "▶ " + detailTitle
+	}
+	kd.SetMasterTitle(masterTitle)
+	kd.SetDetailTitle(detailTitle)
 }
 
 func (kd *KVDetail) initBucket() {

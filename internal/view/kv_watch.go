@@ -113,7 +113,7 @@ func (kw *KVWatch) Hints() []components.KeyHint {
 }
 
 func (kw *KVWatch) HandleKey(event *tcell.EventKey) bool {
-	if handleTextViewScroll(kw.preview, event) {
+	if handleMasterDetailPreview(kw.MasterDetailView, kw.preview, event) {
 		return true
 	}
 	switch event.Rune() {

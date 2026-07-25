@@ -3,6 +3,7 @@ package view
 import (
 	"testing"
 
+	"github.com/atterpac/dado/components"
 	"github.com/atterpac/dado/core"
 	"github.com/gdamore/tcell/v2"
 )
@@ -34,6 +35,36 @@ func TestHandleTextViewScroll(t *testing.T) {
 	}
 	row, _ = view.GetScrollOffset()
 	if row != 0 {
+		t.Fatalf("scroll row = %d", row)
+	}
+}
+
+func TestHandleMasterDetailPreview(t *testing.T) {
+	table := components.NewTable().SetHeaders("KEY")
+	view := core.NewTextView().
+		SetScrollable(true).
+		SetText("one\ntwo\nthree")
+	view.SetRect(0, 0, 10, 1)
+	layout := components.NewMasterDetailView().
+		SetMasterContent(table).
+		SetDetailContent(view)
+	layout.Focus()
+
+	if !handleMasterDetailPreview(layout, view, tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone)) {
+		t.Fatal("Enter was not handled")
+	}
+	if layout.IsMasterFocused() {
+		t.Fatal("master pane remained focused")
+	}
+	if !view.HasFocus() {
+		t.Fatal("preview did not receive focus")
+	}
+
+	if !handleMasterDetailPreview(layout, view, tcell.NewEventKey(tcell.KeyRune, 'j', tcell.ModNone)) {
+		t.Fatal("j was not handled")
+	}
+	row, _ := view.GetScrollOffset()
+	if row != 1 {
 		t.Fatalf("scroll row = %d", row)
 	}
 }

@@ -117,7 +117,7 @@ func (mb *MessageBrowser) Hints() []components.KeyHint {
 }
 
 func (mb *MessageBrowser) HandleKey(event *tcell.EventKey) bool {
-	if handleTextViewScroll(mb.preview, event) {
+	if handleMasterDetailPreview(mb.MasterDetailView, mb.preview, event) {
 		return true
 	}
 	if event.Key() == tcell.KeyEscape {
