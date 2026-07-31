@@ -113,6 +113,9 @@ func (kw *KVWatch) Hints() []components.KeyHint {
 }
 
 func (kw *KVWatch) HandleKey(event *tcell.EventKey) bool {
+	if handleMasterDetailPreview(kw.MasterDetailView, kw.preview, event) {
+		return true
+	}
 	switch event.Rune() {
 	case 'y':
 		s := kw.state.Get()
@@ -359,7 +362,7 @@ func (kw *KVWatch) fetchAndRenderValue(evt nats.KVWatchEvent, header string) {
 			data = prettyJSON.String()
 		}
 	}
-	data = strings.ReplaceAll(data, "[", "[[")
+	data = escapeDynamicText(data)
 	vb.WriteString(data)
 
 	text := vb.String()

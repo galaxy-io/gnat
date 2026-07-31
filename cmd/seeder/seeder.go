@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -480,6 +481,7 @@ func seedKV(ctx context.Context, js jetstream.JetStream) {
 				"feature.dark_mode":         `true`,
 				"feature.beta_access":       `false`,
 				"feature.notifications":     `true`,
+				"test.scroll.long-json":     longKVTestValue(),
 			},
 		},
 		{
@@ -552,6 +554,29 @@ func seedKV(ctx context.Context, js jetstream.JetStream) {
 		}
 		fmt.Printf("kv %-20s keys=%d\n", b.cfg.Bucket, len(b.entries))
 	}
+}
+
+func longKVTestValue() string {
+	items := make([]map[string]any, 80)
+	for i := range items {
+		items[i] = map[string]any{
+			"id":          fmt.Sprintf("item-%03d", i+1),
+			"name":        fmt.Sprintf("Scrolling test item %d", i+1),
+			"enabled":     i%3 != 0,
+			"priority":    i%10 + 1,
+			"description": "This entry provides enough formatted JSON lines to verify preview scrolling and pane focus.",
+			"tags":        []string{"gnat", "kv", "scrolling", fmt.Sprintf("group-%d", i%5)},
+		}
+	}
+	value := map[string]any{
+		"title": "Long KV preview scrolling test",
+		"items": items,
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
 }
 
 func seedObjectStore(ctx context.Context, js jetstream.JetStream) {

@@ -17,6 +17,11 @@ type RawMessage struct {
 	Time     time.Time
 }
 
+type KeyValueStoreStatus struct {
+	jetstream.KeyValueStatus
+	KeyCount uint64
+}
+
 // ServerInfo bundles identity and configuration of the connected NATS server.
 type ServerInfo struct {
 	Name        string        // Server name (may be empty for older servers)
@@ -78,7 +83,7 @@ type Provider interface {
 	DeleteConsumer(ctx context.Context, streamName, consumerName string) error
 
 	// Key-Value
-	ListKeyValueStores(ctx context.Context) ([]jetstream.KeyValueStatus, error)
+	ListKeyValueStores(ctx context.Context) ([]KeyValueStoreStatus, error)
 	GetKeyValue(ctx context.Context, bucket string) (jetstream.KeyValue, error)
 	ListKeyValueKeys(ctx context.Context, bucket string) ([]string, error)
 	CreateKeyValue(ctx context.Context, cfg jetstream.KeyValueConfig) (jetstream.KeyValue, error)

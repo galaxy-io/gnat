@@ -352,6 +352,10 @@ func (mm *MessageMonitor) HandleKey(event *tcell.EventKey) bool {
 		return mm.subjectInput.HandleKey(event)
 	}
 
+	if handleMasterDetailPreview(mm.MasterDetailView, mm.preview, event) {
+		return true
+	}
+
 	// Escape — clear pipeline first, then JSON filter, then search filter, then back-nav
 	if event.Key() == tcell.KeyEscape {
 		if mm.pipeline != nil {
@@ -844,7 +848,7 @@ func (mm *MessageMonitor) renderPreview(displayIdx int) {
 			fmt.Fprintf(&b, "\n[%s]Payload:[-]\n", dim)
 		} else {
 			fmt.Fprintf(&b, "\n[%s]Result:[-]\n", dim)
-			result = strings.ReplaceAll(result, "[", "[[")
+			result = escapeDynamicText(result)
 			b.WriteString(result)
 
 			mm.preview.SetText(b.String())
@@ -863,7 +867,7 @@ func (mm *MessageMonitor) renderPreview(displayIdx int) {
 			fmt.Fprintf(&b, "\n[%s]Payload:[-]\n", dim)
 		} else {
 			fmt.Fprintf(&b, "\n[%s]Result:[-]\n", dim)
-			result = strings.ReplaceAll(result, "[", "[[")
+			result = escapeDynamicText(result)
 			b.WriteString(result)
 
 			mm.preview.SetText(b.String())
@@ -883,7 +887,7 @@ func (mm *MessageMonitor) renderPreview(displayIdx int) {
 		}
 	}
 
-	data = strings.ReplaceAll(data, "[", "[[")
+	data = escapeDynamicText(data)
 	b.WriteString(data)
 
 	mm.preview.SetText(b.String())

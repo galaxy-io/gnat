@@ -504,14 +504,26 @@ func (c *Client) DeleteConsumer(ctx context.Context, streamName, consumerName st
 
 // Key-Value
 
-func (c *Client) ListKeyValueStores(ctx context.Context) ([]jetstream.KeyValueStatus, error) {
-	var stores []jetstream.KeyValueStatus
+func (c *Client) ListKeyValueStores(ctx context.Context) ([]KeyValueStoreStatus, error) {
+	var statuses []jetstream.KeyValueStatus
 	lister := c.jetStream().KeyValueStores(ctx)
 	for status := range lister.Status() {
-		stores = append(stores, status)
+		statuses = append(statuses, status)
 	}
 	if err := lister.Error(); err != nil {
-		return stores, err
+		return nil, err
+	}
+
+	stores := make([]KeyValueStoreStatus, 0, len(statuses))
+	for _, status := range statuses {
+		keys, err := c.ListKeyValueKeys(ctx, status.Bucket())
+		if err != nil {
+			return nil, fmt.Errorf("listing keys for %s: %w", status.Bucket(), err)
+		}
+		stores = append(stores, KeyValueStoreStatus{
+			KeyValueStatus: status,
+			KeyCount:       uint64(len(keys)),
+		})
 	}
 	return stores, nil
 }
@@ -605,7 +617,7 @@ func (c *Client) SubscribeAdvisories(ctx context.Context, handler func(Advisory)
 		return err
 	}
 	// Cap the pending buffer so a high-volume advisory stream cannot
-	// grow unboundedly 
+	// grow unboundedly
 	_ = sub.SetPendingLimits(1024, 8*1024*1024) // 1024 msgs / 8 MB
 	c.mu.Lock()
 	c.advSub = sub
