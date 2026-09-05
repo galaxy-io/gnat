@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -28,6 +29,8 @@ type KVDetail struct {
 
 	kv      jetstream.KeyValue
 	binding *binding.TableBinding[string]
+	keys    []string
+	alpha   bool
 
 	refreshCancel context.CancelFunc
 	stopped       int32
@@ -39,13 +42,15 @@ func NewKVDetail(app *App, bucket string) *KVDetail {
 		app:           app,
 		bucket:        bucket,
 		refreshCancel: func() {},
+		alpha:         true,
 	}
 
 	kd.keyTable = components.NewTable().SetHeaders("KEY").
 		ConfigureEmpty(theme.IconKey, "No Keys", "")
 
 	kd.valueView = core.NewTextView().
-		SetDynamicColors(true)
+		SetDynamicColors(true).
+		SetScrollable(true)
 
 	// Set up reactive table binding for keys
 	kd.binding = binding.NewTableBinding[string](kd.keyTable).
@@ -73,6 +78,7 @@ func NewKVDetail(app *App, bucket string) *KVDetail {
 		SetMasterContent(kd.keyTable).
 		SetDetailContent(kd.valueView).
 		SetRatio(0.4)
+	kd.updatePaneHighlight()
 
 	return kd
 }
@@ -109,12 +115,17 @@ func (kd *KVDetail) Hints() []components.KeyHint {
 		{Key: "e", Description: "Edit"},
 		{Key: "d", Description: "Delete"},
 		{Key: "w", Description: "Watch"},
+		{Key: "s", Description: "Toggle sort"},
 		{Key: "p", Description: "Preview"},
 		{Key: "r", Description: "Refresh"},
 	}
 }
 
 func (kd *KVDetail) HandleKey(event *tcell.EventKey) bool {
+	if handleMasterDetailPreview(kd.MasterDetailView, kd.valueView, event) {
+		kd.updatePaneHighlight()
+		return true
+	}
 	switch event.Rune() {
 	case 'y':
 		kd.yankValue()
@@ -131,6 +142,10 @@ func (kd *KVDetail) HandleKey(event *tcell.EventKey) bool {
 	case 'w':
 		kd.app.NavigateToKVWatch(kd.bucket)
 		return true
+	case 's':
+		kd.alpha = !kd.alpha
+		kd.applyKeyOrder()
+		return true
 	case 'd':
 		kd.deleteKey()
 		return true
@@ -142,6 +157,18 @@ func (kd *KVDetail) HandleKey(event *tcell.EventKey) bool {
 		return true
 	}
 	return kd.MasterDetailView.HandleKey(event)
+}
+
+func (kd *KVDetail) updatePaneHighlight() {
+	masterTitle := fmt.Sprintf("Keys: %s", kd.bucket)
+	detailTitle := "Value"
+	if kd.IsMasterFocused() {
+		masterTitle = "▶ " + masterTitle
+	} else {
+		detailTitle = "▶ " + detailTitle
+	}
+	kd.SetMasterTitle(masterTitle)
+	kd.SetDetailTitle(detailTitle)
 }
 
 func (kd *KVDetail) initBucket() {
@@ -201,13 +228,31 @@ func (kd *KVDetail) loadKeys() {
 			return
 		}
 
-		kd.binding.SetData(keys)
 		kd.app.QueueUpdateDraw(func() {
+			kd.keys = append(kd.keys[:0], keys...)
+			kd.applyKeyOrder()
 			if len(keys) > 0 {
 				kd.loadValue(1)
 			}
 		})
 	}()
+}
+
+func (kd *KVDetail) applyKeyOrder() {
+	kd.binding.SetData(orderKVKeys(kd.keys, kd.alpha))
+	if kd.alpha {
+		kd.keyTable.SetHeaders("KEY (A-Z)")
+		return
+	}
+	kd.keyTable.SetHeaders("KEY (SOURCE)")
+}
+
+func orderKVKeys(keys []string, alpha bool) []string {
+	ordered := append([]string(nil), keys...)
+	if alpha {
+		sort.Strings(ordered)
+	}
+	return ordered
 }
 
 func (kd *KVDetail) loadValue(row int) {
@@ -453,13 +498,14 @@ func (kd *KVDetail) showRevisionDiff(oldEntry, newEntry jetstream.KeyValueEntry)
 		SetDiff(oldVal, newVal).
 		SetTitle(fmt.Sprintf("Rev %d → %d", oldEntry.Revision(), newEntry.Revision())).
 		SetShowLineNumbers(true)
+	scrollableDiff := &scrollableDiffViewer{DiffViewer: diff}
 
 	modal := components.NewModal(components.ModalConfig{
 		Title:    fmt.Sprintf("Diff: Rev %d → %d", oldEntry.Revision(), newEntry.Revision()),
 		Width:    80,
 		Height:   24,
 		Backdrop: true,
-	}).SetContent(diff)
+	}).SetContent(scrollableDiff)
 
 	modal.SetHints([]components.KeyHint{
 		{Key: "j/k", Description: "Scroll"},
@@ -502,7 +548,7 @@ func (kd *KVDetail) renderValue(entry jetstream.KeyValueEntry) {
 		dim, entry.Created().Format(time.RFC3339),
 		dim, op,
 		dim,
-		value,
+		escapeDynamicText(value),
 	)
 
 	kd.valueView.SetText(text)

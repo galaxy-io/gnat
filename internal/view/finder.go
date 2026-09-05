@@ -94,7 +94,7 @@ func (a *App) showGlobalFinder() {
 				items = append(items, components.FinderItem{
 					ID:          kv.Bucket(),
 					Label:       kv.Bucket(),
-					Description: formatNumber(kv.Values()) + " keys, " + formatBytes(kv.Bytes()),
+					Description: formatNumber(kv.KeyCount) + " keys, " + formatBytes(kv.Bytes()),
 					Category:    "KV Stores",
 					Icon:        "󰌆",
 				})
