@@ -132,7 +132,7 @@ func NewPlayground(app *App) *Playground {
 		SetRight(subPanel)
 
 	pg.focusItems = []core.Widget{
-		pg.pubSubject, pg.pubPayload, pg.pubHeaderK, pg.pubHeaderV, pg.subTable,
+		pg.pubSubject, pg.pubPayload, pg.pubHeaderK, pg.pubHeaderV, pg.subTable, pg.subPreview,
 	}
 
 	pg.state = binding.NewValue(playgroundState{mode: "JS"})
@@ -183,6 +183,9 @@ func (pg *Playground) Hints() []components.KeyHint {
 }
 
 func (pg *Playground) HandleKey(event *tcell.EventKey) bool {
+	if handleTextViewScroll(pg.subPreview, event) {
+		return true
+	}
 	switch {
 	case event.Key() == tcell.KeyCtrlS:
 		go pg.publish()
@@ -537,7 +540,7 @@ func (pg *Playground) renderSubPreview(displayIdx int) {
 			data = prettyJSON.String()
 		}
 	}
-	data = strings.ReplaceAll(data, "[", "[[")
+	data = escapeDynamicText(data)
 	b.WriteString(data)
 
 	pg.subPreview.SetText(b.String())
