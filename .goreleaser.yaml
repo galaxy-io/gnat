@@ -51,8 +51,12 @@ release:
   draft: false
   prerelease: auto
 
-brews:
+homebrew_casks:
   - name: gnat
+    ids:
+      - gnat
+    binaries:
+      - gnat
     repository:
       owner: galaxy-io
       name: homebrew-tap
@@ -60,11 +64,12 @@ brews:
     commit_author:
       name: gx-null[bot]
       email: 286761379+gx-null[bot]@users.noreply.github.com
-    directory: Formula
+    directory: Casks
     homepage: "https://github.com/galaxy-io/gnat"
     description: "TUI Client for NATS"
-    license: "MIT"
-    install: |
-      bin.install "gnat"
-    test: |
-      system "#{bin}/gnat", "--version"
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/gnat"]
+          end
