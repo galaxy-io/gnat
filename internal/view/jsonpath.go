@@ -172,7 +172,7 @@ func walkPath(value any, segments []pathSegment) (any, error) {
 }
 
 func formatResult(value any) (string, error) {
-	data, err := json.MarshalIndent(value, "", "  ")
+	data, err := marshalDisplayJSON(value, "  ")
 	if err != nil {
 		return "", fmt.Errorf("failed to format result: %w", err)
 	}

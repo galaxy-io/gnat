@@ -2,7 +2,6 @@ package view
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -157,7 +156,7 @@ func (ol *ObjectList) HandleKey(event *tcell.EventKey) bool {
 				"replicas":    s.Replicas(),
 				"sealed":      s.Sealed(),
 			}
-			data, err := json.MarshalIndent(info, "", "  ")
+			data, err := marshalDisplayJSON(info, "  ")
 			if err != nil {
 				ol.app.ShowError(err.Error())
 			} else if err := clipboard.Copy(string(data)); err != nil {

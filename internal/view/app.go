@@ -990,24 +990,6 @@ func (a *App) runCommandConsumers(name, expandedCmd string) {
 	}()
 }
 
-func formatJSONPretty(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return s
-	}
-
-	var parsed interface{}
-	if err := json.Unmarshal([]byte(s), &parsed); err != nil {
-		return s
-	}
-
-	pretty, err := json.MarshalIndent(parsed, "", "  ")
-	if err != nil {
-		return s
-	}
-	return string(pretty)
-}
-
 // Close releases background resources. Call after Run() returns.
 func (a *App) Close() {
 	close(a.stopMetrics)

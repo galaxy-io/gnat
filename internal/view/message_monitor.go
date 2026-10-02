@@ -431,7 +431,7 @@ func (mm *MessageMonitor) HandleKey(event *tcell.EventKey) bool {
 			} else {
 				full["payload"] = string(msg.Data)
 			}
-			if data, err := json.MarshalIndent(full, "", "  "); err == nil {
+			if data, err := marshalDisplayJSON(full, "  "); err == nil {
 				if err := clipboard.Copy(string(data)); err != nil {
 					mm.app.ShowError("Clipboard: " + err.Error())
 				} else {

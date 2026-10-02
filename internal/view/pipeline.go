@@ -68,7 +68,7 @@ func (p *Pipeline) Execute(data []byte) (string, error) {
 		current = result
 	}
 
-	out, err := json.MarshalIndent(current, "", "  ")
+	out, err := marshalDisplayJSON(current, "  ")
 	if err != nil {
 		return "", fmt.Errorf("formatting result: %w", err)
 	}
