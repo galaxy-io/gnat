@@ -198,7 +198,7 @@ func (mb *MessageBrowser) HandleKey(event *tcell.EventKey) bool {
 				} else {
 					entry["payload"] = string(msg.Data)
 				}
-				line, _ := json.Marshal(entry)
+				line, _ := marshalDisplayJSON(entry, "")
 				lines = append(lines, string(line))
 			}
 			if err := clipboard.Copy(strings.Join(lines, "\n")); err != nil {

@@ -2,7 +2,6 @@ package view
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -133,7 +132,7 @@ func (cd *ConsumerDetail) HandleKey(event *tcell.EventKey) bool {
 		return true
 	case 'y':
 		if info := cd.info.Get(); info != nil {
-			data, err := json.MarshalIndent(info, "", "  ")
+			data, err := marshalDisplayJSON(info, "  ")
 			if err != nil {
 				cd.app.ShowError(err.Error())
 			} else if err := clipboard.Copy(string(data)); err != nil {
@@ -145,7 +144,7 @@ func (cd *ConsumerDetail) HandleKey(event *tcell.EventKey) bool {
 		return true
 	case 'x':
 		if info := cd.info.Get(); info != nil {
-			data, err := json.MarshalIndent(info.Config, "", "  ")
+			data, err := marshalDisplayJSON(info.Config, "  ")
 			if err != nil {
 				cd.app.ShowError(err.Error())
 			} else if err := clipboard.Copy(string(data)); err != nil {
