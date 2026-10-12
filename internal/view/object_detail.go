@@ -2,7 +2,6 @@ package view
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -145,7 +144,7 @@ func (od *ObjectDetail) HandleKey(event *tcell.EventKey) bool {
 		return true
 	case 'y':
 		if obj, ok := od.binding.GetSelectedValue(); ok && obj != nil {
-			data, err := json.MarshalIndent(obj, "", "  ")
+			data, err := marshalDisplayJSON(obj, "  ")
 			if err != nil {
 				od.app.ShowError(err.Error())
 			} else if err := clipboard.Copy(string(data)); err != nil {

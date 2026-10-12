@@ -2,7 +2,6 @@ package view
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -173,7 +172,7 @@ func (kl *KVList) HandleKey(event *tcell.EventKey) bool {
 				"ttl":        s.TTL().String(),
 				"compressed": s.IsCompressed(),
 			}
-			data, err := json.MarshalIndent(info, "", "  ")
+			data, err := marshalDisplayJSON(info, "  ")
 			if err != nil {
 				kl.app.ShowError(err.Error())
 			} else if err := clipboard.Copy(string(data)); err != nil {

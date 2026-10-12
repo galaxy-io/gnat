@@ -254,5 +254,8 @@ func (pf *ProfileForm) HandleKey(event *tcell.EventKey) bool {
 		}
 		return true
 	}
-	return pf.form.HandleKey(event)
+	pf.form.HandleKey(event)
+	// Form.HandleKey returns false after forwarding input to a field. Consume
+	// it here so parent widgets do not dispatch the same event a second time.
+	return true
 }

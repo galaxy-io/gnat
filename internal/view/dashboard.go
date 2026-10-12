@@ -2,7 +2,6 @@ package view
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -422,7 +421,7 @@ func (d *Dashboard) HandleKey(event *tcell.EventKey) bool {
 			"api_errors":  snap.apiErrors,
 			"domain":      snap.domain,
 		}
-		data, err := json.MarshalIndent(info, "", "  ")
+		data, err := marshalDisplayJSON(info, "  ")
 		if err != nil {
 			d.app.ShowError(err.Error())
 		} else if err := clipboard.Copy(string(data)); err != nil {

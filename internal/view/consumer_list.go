@@ -251,7 +251,7 @@ func (cl *ConsumerList) HandleKey(event *tcell.EventKey) bool {
 		return true
 	case 'y':
 		if c, ok := cl.binding.GetSelectedValue(); ok && c != nil {
-			data, err := json.MarshalIndent(c.Config, "", "  ")
+			data, err := marshalDisplayJSON(c.Config, "  ")
 			if err != nil {
 				cl.app.ShowError(err.Error())
 			} else if err := clipboard.Copy(string(data)); err != nil {

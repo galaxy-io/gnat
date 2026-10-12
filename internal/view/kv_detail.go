@@ -1,6 +1,7 @@
 package view
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -529,11 +530,9 @@ func (kd *KVDetail) renderValue(entry jetstream.KeyValueEntry) {
 
 	// Format value — detect JSON
 	value := string(entry.Value())
-	var prettyJSON json.RawMessage
-	if json.Unmarshal(entry.Value(), &prettyJSON) == nil {
-		if formatted, err := json.MarshalIndent(prettyJSON, "", "  "); err == nil {
-			value = string(formatted)
-		}
+	var prettyJSON bytes.Buffer
+	if err := json.Indent(&prettyJSON, entry.Value(), "", "  "); err == nil {
+		value = prettyJSON.String()
 	}
 
 	text := fmt.Sprintf(

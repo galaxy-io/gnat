@@ -2,7 +2,6 @@ package view
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -249,7 +248,7 @@ func (sl *StreamList) HandleKey(event *tcell.EventKey) bool {
 		return true
 	case event.Rune() == 'y':
 		if s, ok := sl.binding.GetSelectedValue(); ok && s != nil {
-			data, err := json.MarshalIndent(s.Config, "", "  ")
+			data, err := marshalDisplayJSON(s.Config, "  ")
 			if err != nil {
 				sl.app.ShowError(err.Error())
 			} else if err := clipboard.Copy(string(data)); err != nil {
