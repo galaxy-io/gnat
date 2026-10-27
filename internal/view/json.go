@@ -27,3 +27,12 @@ func formatJSONPretty(s string) string {
 	}
 	return output.String()
 }
+
+// formatPreviewPayload indents JSON values and leaves other payloads untouched.
+func formatPreviewPayload(data []byte) string {
+	var output bytes.Buffer
+	if err := json.Indent(&output, data, "", "  "); err != nil {
+		return string(data)
+	}
+	return output.String()
+}
