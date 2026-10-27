@@ -1,9 +1,7 @@
 package view
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"sync/atomic"
@@ -528,12 +526,7 @@ func (kd *KVDetail) renderValue(entry jetstream.KeyValueEntry) {
 		op = "PURGE"
 	}
 
-	// Format value — detect JSON
-	value := string(entry.Value())
-	var prettyJSON bytes.Buffer
-	if err := json.Indent(&prettyJSON, entry.Value(), "", "  "); err == nil {
-		value = prettyJSON.String()
-	}
+	value := formatPreviewPayload(entry.Value())
 
 	text := fmt.Sprintf(
 		"[%s]Key:[-]       [%s]%s[-]\n"+

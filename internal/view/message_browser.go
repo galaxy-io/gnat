@@ -1,7 +1,6 @@
 package view
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -478,13 +477,7 @@ func (mb *MessageBrowser) renderPreview(row int) {
 	}
 
 	fmt.Fprintf(&b, "\n[%s]Payload:[-]\n", dim)
-	data := string(msg.Data)
-	if json.Valid(msg.Data) {
-		var prettyJSON bytes.Buffer
-		if err := json.Indent(&prettyJSON, msg.Data, "", "  "); err == nil {
-			data = prettyJSON.String()
-		}
-	}
+	data := formatPreviewPayload(msg.Data)
 	data = escapeDynamicText(data)
 	b.WriteString(data)
 

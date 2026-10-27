@@ -47,6 +47,19 @@ func TestFormatJSONPrettyPreservesContent(t *testing.T) {
 	}
 }
 
+func TestFormatPreviewPayload(t *testing.T) {
+	input := []byte(`{"items":[{"name":"example"}]}`)
+	want := "{\n  \"items\": [\n    {\n      \"name\": \"example\"\n    }\n  ]\n}"
+	if got := formatPreviewPayload(input); got != want {
+		t.Fatalf("JSON preview = %q; want %q", got, want)
+	}
+
+	plain := []byte("  plain [text]  \n")
+	if got := formatPreviewPayload(plain); got != string(plain) {
+		t.Fatalf("plain preview = %q; want %q", got, plain)
+	}
+}
+
 func TestJSONQueryResultsPreserveHTMLCharacters(t *testing.T) {
 	data := []byte(`{"regex":"(?<name>a&b>)"}`)
 	want := `"(?<name>a&b>)"`
